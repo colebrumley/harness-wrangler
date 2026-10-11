@@ -141,6 +141,9 @@ impl Api {
             }),
 
             // ------------------------------------------------ experiments
+            "guide" => self.guide()?,
+
+            // ------------------------------------------------ experiments
             "experiments_list" => {
                 let launches = s.list_launches(None)?;
                 let list: Vec<Value> = p
@@ -169,6 +172,7 @@ impl Api {
                             Err(e) => out["error"] = json!(format!("{e:#}")),
                         }
                         if let Ok(tasks) = p.load_tasks(&exp) {
+                            out["estimate"] = self.estimate(&exp, tasks.len());
                             out["total_runs"] = json!(tasks.len() * exp.variants().len() * exp.runs_per_cell as usize);
                             out["tasks"] = json!(tasks);
                         }
@@ -442,6 +446,92 @@ impl Api {
         })
     }
 
+    /// Rough time and cost for one launch, from this project's own history
+    /// when it has any (same runner), else from typical figures.
+    fn estimate(&self, exp: &crate::model::Experiment, n_tasks: usize) -> Value {
+        let variants = exp.variants();
+        let runs = n_tasks * variants.len() * exp.runs_per_cell as usize;
+        let (mut wall, mut cost, mut n) = (0.0, 0.0, 0usize);
+        for l in self.store.list_launches(None).unwrap_or_default().iter().take(8) {
+            let Ok(launch) = self.store.launch(l.id) else { continue };
+            if launch.def.runner.kind != exp.runner.kind { continue }
+            for m in self.store.metrics_for_launch(l.id).unwrap_or_default().values() {
+                if let Some(w) = m.get("wall_time_s") {
+                    wall += w;
+                    cost += m.get("cost_usd").copied().unwrap_or(0.0);
+                    n += 1;
+                }
+            }
+        }
+        let mock = exp.runner.kind == "mock";
+        let (avg_wall, avg_cost, basis) = if n >= 3 { (wall / n as f64, cost / n as f64, format!("from {n} earlier runs in this project")) } else if mock { (0.1, 0.0, "mock runner".to_string()) } else { (25.0, 0.08, "a typical short task; the first launch will replace this guess".to_string()) };
+        let conc = exp.runner.concurrency.max(1) as f64;
+        let judge = exp.judge();
+        let nv = variants.len();
+        let judge_calls = judge.as_ref().map(|c| {
+            let per = c.pairwise_reps.unwrap_or(exp.runs_per_cell.min(3)) as usize;
+            let all = c.pairwise_mode.clone().unwrap_or_else(|| if nv <= 4 { "all".into() } else { "baseline".into() }) == "all";
+            let vp = if all { nv * nv.saturating_sub(1) / 2 } else { nv.saturating_sub(1) };
+            (if c.rubric_scoring { runs } else { 0 }) + (if c.pairwise { vp * n_tasks * per * 2 } else { 0 })
+        }).unwrap_or(0);
+        let judge_mock = judge.as_ref().map(|c| c.model == "mock").unwrap_or(true);
+        let secs = runs as f64 * avg_wall / conc + if judge_mock { 0.0 } else { judge_calls as f64 * 20.0 / conc };
+        let judge_cost = if judge_mock { 0.0 } else { judge_calls as f64 * 0.06 };
+        json!({"runs": runs, "judge_calls": judge_calls, "minutes": secs / 60.0, "agent_cost_usd": runs as f64 * avg_cost, "judge_cost_usd": judge_cost, "basis": basis})
+    }
+
+    /// Where this project stands and what to do next: the steps from an
+    /// empty folder to acting on results, each marked done or not.
+    fn guide(&self) -> Result<Value> {
+        let (p, s) = (&self.project, &self.store);
+        let tasks = p.list_all_tasks().into_iter().filter(|t| t.is_ok()).count();
+        let mut patterns = p.list_overlays().into_iter().filter(|o| !crate::model::is_empty_overlay(o) && !o.contains("/ablation/")).collect::<Vec<_>>();
+        patterns.extend(p.list_skill_dirs());
+        let experiments = p.list_experiments();
+        let launches = s.list_launches(None)?;
+        let running = launches.iter().find(|l| l.status == "running");
+        let finished = launches.iter().find(|l| l.status == "done" && l.runs_done > 0);
+        let stopped = launches.iter().find(|l| matches!(l.status.as_str(), "interrupted" | "cancelled" | "budget") && l.runs_done < l.runs_total);
+        let review = match finished {
+            Some(l) if s.launch(l.id).map(|x| x.def.human_enabled()).unwrap_or(false) => Some((l.id, review::progress(s, l.id)?)),
+            _ => None,
+        };
+        let first_exp = experiments.iter().find(|e| e.error.is_none()).map(|e| e.name.clone());
+        let mut steps = vec![
+            json!({"id": "tasks", "title": "Write a few tasks", "done": tasks > 0,
+                "detail": if tasks > 0 { format!("{tasks} task file{} in tasks/.", if tasks == 1 { "" } else { "s" }) } else { "A task is a prompt plus the files the agent starts with and how the result is graded. Three to six tasks that differ from each other are a good start.".into() },
+                "time": "5 to 10 minutes each, or ask the agent in the terminal to draft them", "action": {"label": if tasks > 0 { "Open Tasks" } else { "Add a task" }, "href": "/experiments/~tasks"}}),
+            json!({"id": "pattern", "title": "Have something to test", "done": !patterns.is_empty(),
+                "detail": if patterns.is_empty() { "A skill folder (with SKILL.md) or a folder holding a CLAUDE.md, anywhere in this project. Models and effort levels need nothing here.".to_string() } else { format!("Found {}: {}", patterns.len(), patterns.iter().take(4).cloned().collect::<Vec<_>>().join(", ")) },
+                "time": "nothing to do if the skill is already in this repo", "action": Value::Null}),
+            json!({"id": "experiment", "title": "Define an experiment", "done": !experiments.is_empty(),
+                "detail": if experiments.is_empty() { "Choose what to vary (for example a skill against no skill, across three models) and which tasks to run.".to_string() } else { format!("{} experiment{}: {}", experiments.len(), if experiments.len() == 1 { "" } else { "s" }, experiments.iter().take(4).map(|e| e.name.clone()).collect::<Vec<_>>().join(", ")) },
+                "time": "about 2 minutes in the form", "action": {"label": if experiments.is_empty() { "New experiment" } else { "Open experiments" }, "href": if experiments.is_empty() { "/experiments/new".to_string() } else { format!("/experiments/{}", first_exp.clone().unwrap_or_default()) }}}),
+        ];
+        let run_detail = match (running, finished, stopped) {
+            (Some(l), _, _) => format!("Launch #{} of {} is running: {} of {} runs done{}.", l.id, l.experiment, l.runs_done, l.runs_total, if l.phase.is_empty() || l.phase == "runs" { String::new() } else { format!(", now {}", l.phase) }),
+            (None, Some(l), _) => format!("Launch #{} of {} finished: {} runs, ${:.2}.", l.id, l.experiment, l.runs_done, l.cost_usd),
+            (None, None, Some(l)) => format!("Launch #{} of {} stopped at {} of {} runs. Open it to resume.", l.id, l.experiment, l.runs_done, l.runs_total),
+            _ => "Every task runs under every variant several times, then the judge scores the results. You can leave it running.".to_string(),
+        };
+        let run_target = running.or(finished).or(stopped).map(|l| l.experiment.clone()).or(first_exp.clone());
+        steps.push(json!({"id": "run", "title": "Run it", "done": finished.is_some(), "active": running.is_some(), "detail": run_detail,
+            "time": "the experiment page shows an estimate before you start; typically minutes to an hour",
+            "action": run_target.map(|n| json!({"label": if running.is_some() { "Watch progress" } else if finished.is_some() { "Open the launch" } else { "Open and run" }, "href": format!("/experiments/{n}")}))}));
+        steps.push(match &review {
+            Some((id, pr)) => json!({"id": "review", "title": "Review a few pairs yourself", "done": pr.recommended_left == 0 && pr.votes > 0 || pr.recommended == 0,
+                "detail": if pr.recommended == 0 { "Nothing to compare in this launch.".to_string() } else if pr.recommended_left == 0 { format!("{} reviewed. That is the starter set; more is optional.", pr.votes) } else { format!("{} of {} done. Blind, side by side, keyboard driven. These are the pairs that settle the most.", pr.votes.min(pr.recommended), pr.recommended) },
+                "time": "about a minute per pair", "action": {"label": "Open Review", "href": format!("/review/{id}")}}),
+            None => json!({"id": "review", "title": "Review a few pairs yourself", "done": false, "optional": true,
+                "detail": "After a run, the app picks the handful of pairs where your judgment matters most. Optional, and worth it when the judge and the numbers disagree.", "time": "about a minute per pair", "action": Value::Null}),
+        });
+        steps.push(json!({"id": "results", "title": "Read the results and act on the advice", "done": false,
+            "detail": match finished { Some(l) => format!("Results and advice for launch #{} are ready.", l.id), None => "Effect sizes with confidence intervals, per task and per model, then a short list of what to change.".to_string() },
+            "time": "5 minutes", "action": finished.map(|l| json!({"label": "Open Results", "href": format!("/results/{}", l.id), "second": {"label": "Open Advice", "href": format!("/advice/{}", l.id)}}))}));
+        let next = steps.iter().position(|st| st["done"] != true && st["optional"] != true).unwrap_or(steps.len() - 1);
+        Ok(json!({"steps": steps, "next": next, "project": p.root.file_name().map(|n| n.to_string_lossy().to_string())}))
+    }
+
     fn task_path(&self, source: &str) -> Result<std::path::PathBuf> {
         if !source.starts_with("tasks/") || !source.ends_with(".toml") || source.contains("..") {
             bail!("task files live under tasks/ and end in .toml");
@@ -467,14 +557,57 @@ impl Api {
         }
         let count = |st: &str| runs.iter().filter(|r| r.status == st).count();
         let sum = |k: &str| metrics.values().filter_map(|m| m.get(k)).sum::<f64>();
-        let judged = self.store.grades_for_launch(id)?.iter().filter(|g| g.tier == "judge").count();
+        let all_grades = self.store.grades_for_launch(id)?;
+        let judge_grades: Vec<_> = all_grades.iter().filter(|g| g.tier == "judge").collect();
+        let judged = judge_grades.len();
+        let judgments = self.store.judgments(id, Some("judge"))?;
+        let cfg = launch.def.judge();
+        let label = |run_id: i64| runs.iter().find(|r| r.id == run_id).map(|r| (r.task_id.clone(), launch.variants.iter().find(|v| v.key == r.variant_key).map(|v| v.label.clone()).unwrap_or_default()));
+        // What the judge has been saying, newest first.
+        let mut feed: Vec<Value> = vec![];
+        for g in judge_grades.iter().rev().take(8) {
+            let (task, variant) = label(g.run_id).unwrap_or_default();
+            let exps = g.detail["expectations"].as_array().cloned().unwrap_or_default();
+            feed.push(json!({"kind": "score", "run_id": g.run_id, "task": task, "variant": variant, "score": g.score,
+                "met": exps.iter().filter(|e| e["passed"] == true).count(), "of": exps.len(), "summary": g.detail["summary"]}));
+        }
+        let mut pair_feed: Vec<Value> = vec![];
+        for j in judgments.iter().rev().take(8) {
+            let (task, a) = label(j.run_a).unwrap_or_default();
+            let (_, b) = label(j.run_b).unwrap_or_default();
+            let winner = match j.winner.as_str() { "a" => a.clone(), "b" => b.clone(), _ => "tie".into() };
+            pair_feed.push(json!({"kind": "pair", "task": task, "a": a, "b": b, "run_a": j.run_a, "run_b": j.run_b, "winner": winner, "consistent": j.consistent, "reason": j.reason}));
+        }
+        let to_score = runs.iter().filter(|r| r.is_complete() && launch.tasks.iter().find(|t| t.id == r.task_id).map(|t| t.graders.judge != Some(false)).unwrap_or(false)).count();
+        let pairs_planned = cfg.as_ref().filter(|c| c.pairwise).map(|c| scheduler::judge_pairs(&launch, &runs, c).len()).unwrap_or(0);
+        // Time left: remaining runs at the observed pace, then the judge calls still to make.
+        let walls: Vec<f64> = runs.iter().filter_map(|r| metrics.get(&r.id)?.get("wall_time_s").copied()).collect();
+        let avg_run = if walls.is_empty() { 30.0 } else { walls.iter().sum::<f64>() / walls.len() as f64 };
+        let conc = launch.def.runner.concurrency.max(1) as f64;
+        let runs_left = runs.iter().filter(|r| r.status == "pending" || r.status == "running").count() as f64;
+        let total_pairs_expected = cfg.as_ref().filter(|c| c.pairwise).map(|c| {
+            // Planned once every run is in; before that, scale up from the cells finished so far.
+            let per = c.pairwise_reps.unwrap_or(launch.def.runs_per_cell.min(3)) as usize;
+            let nv = launch.variants.len();
+            let mode_all = c.pairwise_mode.clone().unwrap_or_else(|| if nv <= 4 { "all".into() } else { "baseline".into() }) == "all";
+            let variant_pairs = if mode_all { nv * nv.saturating_sub(1) / 2 } else { nv.saturating_sub(1) };
+            variant_pairs * launch.tasks.len() * per
+        }).unwrap_or(0);
+        let score_left = if cfg.as_ref().map(|c| c.rubric_scoring).unwrap_or(false) { (runs.len().saturating_sub(judged)) as f64 } else { 0.0 };
+        let pair_left = total_pairs_expected.saturating_sub(judgments.len()) as f64;
+        let judge_secs = 20.0;
+        let eta_s = if launch.status == "running" { Some(runs_left * avg_run / conc + (score_left * judge_secs + pair_left * 2.0 * judge_secs) / conc) } else { None };
         Ok(json!({
             "launch_id": id, "experiment": launch.experiment, "status": launch.status, "phase": launch.phase,
             "created_at": launch.created_at, "finished_at": launch.finished_at, "note": launch.note, "suite": launch.suite,
             "active": self.jobs.lock().unwrap().contains_key(&id),
             "counts": {"total": runs.len(), "done": count("done"), "failed": count("failed"), "timeout": count("timeout"), "running": count("running"), "pending": count("pending"), "cancelled": count("cancelled")},
             "cost_usd": sum("cost_usd"), "judge_cost_usd": sum("judge_cost_usd"),
-            "judged": judged, "judgments": self.store.judgments(id, Some("judge"))?.len(),
+            "judged": judged, "judgments": judgments.len(),
+            "judge": {"model": cfg.as_ref().map(|c| c.model.clone()), "rubric": cfg.as_ref().and_then(|c| c.rubric.clone()),
+                "to_score": to_score, "scored": judged, "pairs_planned": pairs_planned.max(judgments.len()), "pairs_expected": total_pairs_expected, "pairs_done": judgments.len(),
+                "scores": feed, "pairs": pair_feed},
+            "eta_s": eta_s, "avg_run_s": avg_run,
             "tasks": launch.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
             "variants": launch.variants.iter().map(|v| json!({"key": v.key, "label": v.label})).collect::<Vec<_>>(),
             "runs_per_cell": launch.def.runs_per_cell,

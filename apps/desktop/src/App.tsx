@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { LaunchSummary, call, inTauri, pickFolder, shell, usd, when } from "./api";
 import { ErrorNote, StatusChip } from "./components";
 import { useLoad, useRoute } from "./hooks";
 import Ablation from "./views/Ablation";
 import Advice from "./views/Advice";
+import AgentPanel from "./views/AgentPanel";
 import Experiments from "./views/Experiments";
 import Regression from "./views/Regression";
 import Results from "./views/Results";
 import Review from "./views/Review";
+import Start from "./views/Start";
 import RunDrawer from "./views/RunDrawer";
 
 const NAV: [string, string][] = [
+  ["start", "Start"],
   ["experiments", "Experiments"],
   ["results", "Results"],
   ["review", "Review"],
@@ -70,6 +73,26 @@ export default function App() {
   const [ready, setReady] = useState(!inTauri);
   const [projectKey, setProjectKey] = useState(0);
   const [run, setRun] = useState<{ id: number; blind: boolean } | null>(null);
+  const [agent, setAgent] = useState(false);
+  // Width of the agent panel, set by dragging its left edge and remembered.
+  const [agentWidth, setAgentWidth] = useState(() => Number(localStorage.getItem("agent.width")) || 520);
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const clamp = (w: number) => Math.round(Math.max(320, Math.min(window.innerWidth - 560, w)));
+    const move = (ev: PointerEvent) => setAgentWidth(clamp(window.innerWidth - ev.clientX));
+    const up = (ev: PointerEvent) => {
+      localStorage.setItem("agent.width", String(clamp(window.innerWidth - ev.clientX)));
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const nudge = (by: number) => setAgentWidth((w) => { const n = Math.max(320, Math.min(window.innerWidth - 560, w + by)); localStorage.setItem("agent.width", String(n)); return n; });
   useEffect(() => {
     if (inTauri) shell<string | null>("project_current").then((p) => setReady(!!p)).catch(() => setReady(false));
   }, []);
@@ -79,7 +102,7 @@ export default function App() {
     if (!inTauri) return;
     let off: (() => void)[] = [];
     let gone = false;
-    const reopen = () => { setMenuError(null); setRun(null); setReady(true); setProjectKey((k) => k + 1); window.location.hash = "/experiments"; };
+    const reopen = () => { setMenuError(null); setRun(null); setReady(true); setProjectKey((k) => k + 1); window.location.hash = "/start"; };
     import("@tauri-apps/api/event").then(async ({ listen }) => {
       const a = await listen<string>("project-menu", async (e) => {
         if (e.payload === "project-close") { await shell("project_close"); setRun(null); setReady(false); return; }
@@ -98,7 +121,7 @@ export default function App() {
   const project = useLoad(ready ? "project_info" : null, {}, [projectKey]);
   const launchesQ = useLoad<LaunchSummary[]>(ready ? "launches_list" : null, {}, [projectKey], 4000);
   const launches = launchesQ.data ?? [];
-  const view = NAV.some(([id]) => id === parts[0]) ? parts[0] : "experiments";
+  const view = NAV.some(([id]) => id === parts[0]) ? parts[0] : "start";
 
   // The launch in view: from the URL, else the most recent one.
   const routeLaunch = ["results", "review", "ablation", "advice"].includes(view) && parts[1] ? Number(parts[1]) : null;
@@ -119,7 +142,7 @@ export default function App() {
     // No launch (a new or just-switched project) means nothing to review.
     if (!launchId || !ready) { setReviewLeft(null); return; }
     let live = true;
-    call("review_next", { launch_id: launchId }).then((r) => { if (live) setReviewLeft(r.progress?.useful_remaining ?? null); }).catch(() => setReviewLeft(null));
+    call("review_next", { launch_id: launchId }).then((r) => { if (live) setReviewLeft(r.progress?.recommended_left ?? null); }).catch(() => setReviewLeft(null));
     return () => { live = false; };
   }, [launchId, ready, view]);
 
@@ -129,7 +152,7 @@ export default function App() {
   const href = (id: string) => (["results", "review", "ablation", "advice"].includes(id) && launchId ? `#/${id}/${launchId}` : `#/${id}`);
 
   return (
-    <div className="app">
+    <div className={`app ${agent && inTauri ? "with-agent" : ""}`} style={agent && inTauri ? { gridTemplateColumns: `176px minmax(0, 1fr) ${agentWidth}px` } : undefined}>
       <nav className="rail" aria-label="Sections">
         <div className="brand">
           <b>Harness Wrangler</b>
@@ -138,10 +161,11 @@ export default function App() {
         {NAV.map(([id, label]) => (
           <a key={id} href={href(id)} className={view === id ? "on" : ""} aria-current={view === id ? "page" : undefined}>
             {label}
-            {id === "review" && reviewLeft ? <span className="badge" title={`${reviewLeft} pairs worth reviewing in this launch`}>{reviewLeft > 99 ? "99+" : reviewLeft}</span> : null}
+            {id === "review" && reviewLeft ? <span className="badge" title={`${reviewLeft} pairs left in this launch's starter set`}>{reviewLeft}</span> : null}
           </a>
         ))}
         <div className="foot">
+          {inTauri && <button className="btn sm" style={{ width: "100%", marginBottom: 8, background: agent ? "#f1f4f7" : "transparent", color: agent ? "#16202b" : "#dfe6ec", borderColor: "#4a5866" }} aria-pressed={agent} onClick={() => setAgent((v) => !v)}>{agent ? "Hide agent" : "Ask the agent"}</button>}
           {inTauri && <button className="btn quiet sm" onClick={async () => { await shell("project_close"); setReady(false); }}>Switch project</button>}
           <div>v{project.data?.version ?? ""}</div>
         </div>
@@ -169,6 +193,7 @@ export default function App() {
           </div>
         )}
         <ErrorNote error={menuError ?? project.error} />
+        {view === "start" && <Start ctx={ctx} onAgent={inTauri ? () => setAgent(true) : undefined} />}
         {view === "experiments" && <Experiments ctx={ctx} selected={parts[1] ?? null} sub={parts[2] ?? null} />}
         {view === "results" && <Results ctx={ctx} />}
         {view === "review" && <Review ctx={ctx} />}
@@ -176,6 +201,7 @@ export default function App() {
         {view === "regression" && <Regression ctx={ctx} selected={parts[1] ?? null} />}
         {view === "advice" && <Advice ctx={ctx} />}
       </div>
+      {agent && inTauri && <AgentPanel projectKey={projectKey} onClose={() => setAgent(false)} onResizeStart={startResize} onNudge={nudge} />}
       {run && <RunDrawer runId={run.id} blind={run.blind} onClose={() => setRun(null)} />}
     </div>
   );

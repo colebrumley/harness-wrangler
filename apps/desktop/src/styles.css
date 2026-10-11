@@ -300,3 +300,34 @@ button.pip { cursor: pointer; }
   .panes { grid-template-columns: 1fr; overflow: auto; }
   .content { padding: 16px 14px 60px; }
 }
+
+/* ------------------------------------------------------- start guide */
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; padding: 16px 18px; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; }
+.step .mark { width: 30px; height: 30px; border-radius: 15px; display: grid; place-items: center; font-weight: 700; background: var(--sunk); color: var(--ink-2); }
+.step.done .mark { background: var(--good-soft); color: var(--good-ink); }
+.step.next, .step.active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.step.next .mark, .step.active .mark { background: var(--accent); color: var(--accent-ink); }
+.step.later { opacity: 0.78; }
+.step p { max-width: 78ch; }
+
+/* --------------------------------------------------------- judge feed */
+.feed { display: flex; flex-direction: column; }
+.feed > div { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--rule); align-items: start; }
+.feed > div:last-child { border-bottom: 0; }
+.feed .score { font-weight: 700; font-size: 15px; text-align: right; }
+.feed .who { font-size: 12.5px; color: var(--ink-2); }
+
+/* ----------------------------------------------------------- terminal */
+.app.with-agent { grid-template-columns: 176px minmax(0, 1fr) 520px; }
+.agent { display: flex; flex-direction: column; background: #10161c; color: #dfe6ec; min-width: 0; border-left: 1px solid var(--rule-strong); height: 100%; overflow: hidden; }
+.agent { position: relative; }
+.agent .resizer { position: absolute; left: -4px; top: 0; bottom: 0; width: 9px; cursor: col-resize; z-index: 5; }
+.agent .resizer::after { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 1px; background: transparent; }
+.agent .resizer:hover::after, .agent .resizer:focus-visible::after { background: var(--accent); width: 2px; left: 3px; }
+.agent > header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #26313b; font-weight: 600; }
+.agent > header .btn { background: transparent; color: #c5d0da; border-color: #3a4753; }
+.agent .term { flex: 1; min-height: 0; padding: 6px 0 0 8px; }
+.agent .hint { padding: 8px 12px; font-size: 12.5px; color: #93a2b1; border-top: 1px solid #26313b; }
+.agent .hint button { all: unset; cursor: pointer; text-decoration: underline; margin-right: 12px; color: #c5d0da; }
+@media (max-width: 1100px) { .app.with-agent { grid-template-columns: 176px 1fr !important; } .agent { position: fixed; right: 0; top: 0; width: min(560px, 96vw); z-index: 25; box-shadow: -8px 0 30px rgba(0, 0, 0, 0.3); } }

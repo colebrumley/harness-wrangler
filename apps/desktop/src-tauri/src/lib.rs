@@ -2,6 +2,8 @@
 //! action goes through `api`, the same command surface `wrangler serve`
 //! exposes over HTTP. The shell itself only owns which project is open.
 
+mod agent;
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -137,13 +139,39 @@ fn project_pending(shell: State<Shell>) -> Option<String> {
 }
 
 #[tauri::command]
-fn project_close(shell: State<Shell>) {
+fn project_close(shell: State<Shell>, agent: State<agent::Agent>) {
+    agent.stop();
     *shell.api.lock().unwrap() = None;
 }
 
 #[tauri::command]
 fn recent_projects(shell: State<Shell>) -> Vec<String> {
     read_recent(&shell)
+}
+
+fn project_root(shell: &Shell) -> Result<PathBuf, String> {
+    shell.api.lock().unwrap().as_ref().map(|a| a.project.root.clone()).ok_or_else(|| "no project is open".to_string())
+}
+
+/// Start the terminal agent in the open project, or reattach to it.
+#[tauri::command]
+fn agent_start(cols: u16, rows: u16, shell: State<Shell>, agent: State<agent::Agent>, app: AppHandle) -> Result<String, String> {
+    agent.start(&app, &project_root(&shell)?, cols.max(20), rows.max(5))
+}
+
+#[tauri::command]
+fn agent_input(data: String, agent: State<agent::Agent>) -> Result<(), String> {
+    agent.input(&data)
+}
+
+#[tauri::command]
+fn agent_resize(cols: u16, rows: u16, agent: State<agent::Agent>) {
+    agent.resize(cols.max(20), rows.max(5));
+}
+
+#[tauri::command]
+fn agent_stop(agent: State<agent::Agent>) {
+    agent.stop();
 }
 
 /// The single entry point for everything the UI does with a project.
@@ -211,6 +239,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shell::default())
+        .manage(agent::Agent::default())
         .setup(|app| {
             let shell = app.state::<Shell>();
             *shell.config_dir.lock().unwrap() = app.path().app_config_dir().ok();
@@ -248,7 +277,7 @@ pub fn run() {
                 let _ = app.emit("project-menu", id);
             }
         })
-        .invoke_handler(tauri::generate_handler![ui_script, ui_script_report, pick_override, project_open, project_init, project_current, project_pending, project_close, recent_projects, api])
+        .invoke_handler(tauri::generate_handler![agent_start, agent_input, agent_resize, agent_stop, ui_script, ui_script_report, pick_override, project_open, project_init, project_current, project_pending, project_close, recent_projects, api])
         .run(tauri::generate_context!())
         .expect("error while running Harness Wrangler");
 }

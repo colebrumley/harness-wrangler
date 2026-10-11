@@ -6,19 +6,38 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && cargo build --release -p wrangler-cli",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
-      { "title": "Harness Wrangler", "width": 1360, "height": 880, "minWidth": 900, "minHeight": 600 }
+      {
+        "title": "Harness Wrangler",
+        "width": 1360,
+        "height": 880,
+        "minWidth": 900,
+        "minHeight": 600
+      }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "category": "DeveloperTool"
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "resources": {
+      "../../../target/release/wrangler": "bin/wrangler"
+    }
   }
 }

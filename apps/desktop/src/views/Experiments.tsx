@@ -159,6 +159,13 @@ function Detail({ name, ctx, onChanged }: { name: string; ctx: Ctx; onChanged: (
               </label>
               {def.graders?.default?.judge && <label className="check small"><input type="checkbox" checked={skipJudge} onChange={(e) => setSkipJudge(e.target.checked)} /> Skip the judge for now</label>}
             </div>
+            {d.estimate && (
+              <p className="muted small">
+                Expect about <b>{duration(d.estimate.minutes * 60)}</b>
+                {d.estimate.agent_cost_usd + d.estimate.judge_cost_usd > 0 ? <> and roughly <b>{usd(d.estimate.agent_cost_usd + d.estimate.judge_cost_usd)}</b> of usage</> : null}
+                : {d.estimate.runs} agent runs{d.estimate.judge_calls ? `, then ${d.estimate.judge_calls} judge calls` : ""}. Estimated {d.estimate.basis}. You can leave it running and come back; a stopped launch resumes where it left off.
+              </p>
+            )}
             <ErrorNote error={error} />
           </div>
         </Panel>
@@ -224,7 +231,14 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
         <div className="meter" role="progressbar" aria-valuemin={0} aria-valuemax={c.total} aria-valuenow={c.done}>
           {seg(c.done, "var(--good)")}{seg(c.running, "var(--series)")}{seg(c.timeout, "var(--warn)")}{seg(c.failed, "var(--bad)")}
         </div>
-        {s.phase && s.status === "running" && s.phase !== "runs" && <p className="muted">Now: {s.phase}{s.has_judge ? ` (${s.judged} runs scored, ${s.judgments} pairs compared)` : ""}</p>}
+        {s.status === "running" && (
+          <p className="muted">
+            <b>{PHASE[s.phase] ?? "Working"}</b>
+            {s.eta_s ? `, about ${duration(s.eta_s)} left in all` : ""}.
+            {" "}{s.phase === "runs" || s.phase === "starting" ? `Runs take about ${Math.round(s.avg_run_s)}s each${s.has_judge ? "; the judge starts when they are all in" : ""}.` : ""}
+          </p>
+        )}
+        {s.has_judge && (s.judge.scored > 0 || s.judge.pairs_done > 0 || s.phase === "judging" || s.phase === "pairwise") && <JudgeFeed j={s.judge} total={c.total} ctx={ctx} live={s.status === "running"} />}
         {overBudget && <div className="note warn">Stopped at the ${s.budget_usd} budget with {c.pending} runs not started. Finished runs are kept. Set a higher cap to continue.</div>}
                 {launch.status === "interrupted" && <div className="note warn">The process running this launch stopped. Finished runs are kept; resume to do the rest.</div>}
         {events.map((e, i) => <div key={i} className="note warn">{e.event === "rate_limited" ? `Rate limited on run ${e.run_id}: waiting ${e.wait_s}s before retry ${e.attempt}. ${e.detail}` : e.message}</div>)}
@@ -254,6 +268,80 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
         <p className="faint small">Each square is one run: green done, blue running, amber timed out, red failed. Select a finished square to open the run.</p>
       </div>
     </Panel>
+  );
+}
+
+const PHASE: Record<string, string> = {
+  starting: "Starting",
+  runs: "Running the agent on each task",
+  judging: "The judge is scoring each result against the task's expectations",
+  pairwise: "The judge is comparing results in blind pairs, each pair in both orders",
+};
+
+function duration(seconds: number): string {
+  if (seconds < 50) return "under a minute";
+  if (seconds < 3300) return `${Math.max(1, Math.round(seconds / 60))} min`;
+  const h = seconds / 3600;
+  return h < 10 ? `${h.toFixed(1)} hours` : `${Math.round(h)} hours`;
+}
+
+/** What the judge is doing and what it has said so far, newest first. */
+function JudgeFeed({ j, total, ctx, live }: { j: any; total: number; ctx: Ctx; live: boolean }) {
+  const [open, setOpen] = useState(live);
+  const bar = (done: number, of: number) => (
+    <div className="meter" style={{ flex: 1, minWidth: 120 }}><i style={{ width: `${of ? Math.min(100, (done / of) * 100) : 0}%`, background: "var(--series)" }} /></div>
+  );
+  return (
+    <div className="panel" style={{ background: "var(--sunk)" }}>
+      <div className="body stack">
+        <div className="row spread wrap">
+          <h3>What the judge is doing</h3>
+          <button className="btn quiet sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "Hide its verdicts" : "Show its verdicts"}</button>
+        </div>
+        <p className="muted small">
+          {j.model} reads each result with the task, its expectations{j.rubric ? ` and the rubric (${j.rubric})` : ""}. It never sees which variant produced a result.
+        </p>
+        <div className="row wrap"><span className="small" style={{ width: 230 }}>Scored against expectations: <b>{j.scored}</b> of {total}</span>{bar(j.scored, total)}</div>
+        {j.pairs_expected > 0 && <div className="row wrap"><span className="small" style={{ width: 230 }}>Blind pairs compared: <b>{j.pairs_done}</b> of {Math.max(j.pairs_expected, j.pairs_done)}</span>{bar(j.pairs_done, Math.max(j.pairs_expected, j.pairs_done))}</div>}
+        {open && (
+          <>
+            {j.pairs.length > 0 && (
+              <div>
+                <h3 style={{ marginBottom: 4 }}>Latest comparisons</h3>
+                <div className="feed">
+                  {j.pairs.map((p: any, i: number) => (
+                    <div key={i}>
+                      <span className="score">{p.winner === "tie" ? "tie" : "won"}</span>
+                      <div>
+                        <div className="who">{p.task}: {p.a} <span className="faint">vs</span> {p.b}{p.consistent === false ? " (it changed its pick when the order was swapped, so this counts as a tie)" : ""}</div>
+                        <div>{p.winner === "tie" ? "" : <b>{p.winner}. </b>}{p.reason}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {j.scores.length > 0 && (
+              <div>
+                <h3 style={{ marginBottom: 4 }}>Latest scores</h3>
+                <div className="feed">
+                  {j.scores.map((x: any) => (
+                    <div key={x.run_id}>
+                      <span className="score">{x.score}<span className="faint small">/10</span></span>
+                      <div>
+                        <div className="who">{x.task}, {x.variant}{x.of ? `: met ${x.met} of ${x.of} expectations` : ""} <button className="btn quiet sm" style={{ padding: "0 4px" }} onClick={() => ctx.openRun(x.run_id)}>open run {x.run_id}</button></div>
+                        <div>{x.summary}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {j.scores.length === 0 && j.pairs.length === 0 && <p className="muted small">Its first verdicts will appear here in a moment.</p>}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

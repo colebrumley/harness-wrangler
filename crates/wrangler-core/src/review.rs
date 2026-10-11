@@ -44,7 +44,15 @@ pub struct Progress {
     /// Unreviewed pairs in comparisons that are still undecided.
     pub useful_remaining: usize,
     pub total_remaining: usize,
+    /// Size of the starter set: the few most informative pairs to review
+    /// first. Everything beyond it is optional.
+    pub recommended: usize,
+    pub recommended_left: usize,
 }
+
+/// How many pairs to ask for up front. Enough to touch each task and each
+/// clean comparison once or twice, never a wall of hundreds.
+pub const STARTER_SET: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reveal {
@@ -167,6 +175,9 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
             }
         }
     }
+    let pool = progress.votes + progress.total_remaining;
+    progress.recommended = STARTER_SET.min(pool);
+    progress.recommended_left = progress.recommended.saturating_sub(progress.votes).min(progress.total_remaining);
     Queue { candidates, progress }
 }
 

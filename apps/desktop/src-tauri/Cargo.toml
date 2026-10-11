@@ -18,3 +18,5 @@ tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+portable-pty = "0.8"
+base64 = "0.22"

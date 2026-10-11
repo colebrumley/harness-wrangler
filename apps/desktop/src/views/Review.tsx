@@ -26,6 +26,9 @@ export default function Review({ ctx }: { ctx: Ctx }) {
   const [loaded, setLoaded] = useState(false);
   const [show, setShow] = useState<"output" | "diff">("output");
   const [auto, setAuto] = useState(() => localStorage.getItem("review.auto") === "1");
+  // Past the starter set, reviewing is opt-in.
+  const [more, setMore] = useState(false);
+  useEffect(() => setMore(false), [id]);
   const reasonRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -92,6 +95,23 @@ export default function Review({ ctx }: { ctx: Ctx }) {
     );
   }
 
+  if (!more && !voted && progress && progress.recommended > 0 && progress.recommended_left === 0) {
+    return (
+      <div className="content">
+        <Empty title={`Starter set done: ${progress.votes} pair${progress.votes === 1 ? "" : "s"} reviewed`}>
+          <p style={{ maxWidth: "60ch", margin: "0 auto 14px" }}>
+            Those were the pairs expected to settle the most. Your votes are already in the results, next to the judge's.
+            You can stop here. {progress.useful_remaining > 0 ? `${progress.useful_remaining} more pairs sit in comparisons that are still undecided, if you want to add evidence.` : "Every comparison is already decided one way or the other."}
+          </p>
+          <div className="row" style={{ justifyContent: "center" }}>
+            <a className="btn primary" style={{ textDecoration: "none" }} href={`#/results/${id}`}>See the results</a>
+            <button className="btn" onClick={() => setMore(true)}>Review more pairs</button>
+          </div>
+        </Empty>
+      </div>
+    );
+  }
+
   const setAnn = (side: "left" | "right") => (all: Annotation[]) => setItem((it: any) => ({ ...it, [side]: { ...it[side], annotations: all } }));
   const hasDiff = !!(item.left.diff || item.right.diff);
   const pane = (side: "left" | "right", letter: string) => {
@@ -123,7 +143,11 @@ export default function Review({ ctx }: { ctx: Ctx }) {
             <div className="stack tight">
               <div className="row wrap">
                 <h2>{item.task_id}</h2>
-                <span className="muted small">{progress.votes} voted. {progress.useful_remaining} pair{progress.useful_remaining === 1 ? "" : "s"} still worth reviewing, {progress.total_remaining} in all.</span>
+                <span className="muted small">
+                  {progress.recommended_left > 0
+                    ? `Pair ${Math.min(progress.votes + 1, progress.recommended)} of ${progress.recommended} in the starter set, chosen to settle the most. About a minute each.`
+                    : `${progress.votes} reviewed. Past the starter set; stop whenever you like.`}
+                </span>
               </div>
               <p>{item.task_prompt}</p>
               {item.expected_output && <p className="muted small">Expected: {item.expected_output}</p>}

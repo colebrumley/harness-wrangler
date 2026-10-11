@@ -46,6 +46,8 @@ Then open the app and choose the `examples` folder, or serve the same UI to a br
 cd examples && ../target/release/wrangler serve
 ```
 
+In the app, the Start page lists the steps from an empty project to acting on results, marks what is done, and says what is next. "Ask the agent" opens a terminal beside the UI running Claude Code in the project folder, briefed on this tool's file formats and commands, with the bundled `wrangler` CLI on its PATH; drag its left edge to resize it.
+
 The app's File menu has Open Project, New Project, Open Recent and Close Project. The first time it reads a project under Documents or Desktop, macOS asks whether to allow access; choose Allow.
 
 For scripted checks of the app itself, `WRANGLER_PICK_FOLDER=<dir>` makes the folder buttons use that path instead of the system picker, and `WRANGLER_UI_SCRIPT="Switch project|Create project in a folder"` presses the named buttons in order and writes what each screen showed to `WRANGLER_UI_REPORT`.

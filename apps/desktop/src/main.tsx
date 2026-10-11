@@ -19,6 +19,12 @@ if (inTauri) {
     const report: { step: string; pressed: boolean; heading: string; text: string }[] = [];
     await sleep(2500);
     for (const step of steps) {
+      // "wait:20" pauses, for steps whose effect takes a while to show.
+      if (step.startsWith("wait:")) {
+        await sleep(Number(step.slice(5)) * 1000);
+        report.push({ step, pressed: true, heading: document.querySelector("h1")?.textContent ?? "", text: document.body.innerText.slice(-1500) });
+        continue;
+      }
       let button: HTMLButtonElement | undefined;
       for (let i = 0; i < 40 && !button; i++) {
         button = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.trim() === step && !b.disabled);
