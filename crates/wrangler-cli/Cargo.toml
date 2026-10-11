@@ -1,0 +1,17 @@
+[package]
+name = "wrangler-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wrangler"
+path = "src/main.rs"
+
+[dependencies]
+wrangler-core = { path = "../wrangler-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+tiny_http = "0.12"
