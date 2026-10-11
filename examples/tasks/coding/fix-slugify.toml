@@ -1,0 +1,17 @@
+id = "fix-slugify"
+prompt = "The tests in tests/ are failing. Fix slugify.py so they pass. Do not change the tests."
+fixture = { dir = "fixtures/slugify" }
+expected_output = "slugify.py fixed with a small diff; all five tests pass; tests unchanged; the final message says what was wrong and that the tests pass."
+expectations = [
+  "The final message states what the bugs were",
+  "The final message says the tests were run and passed",
+  "The final message is short: no restating of the task, no closing recap",
+]
+tags = ["coding", "bugfix"]
+
+[graders]
+deterministic = [
+  { kind = "command", cmd = "python3 -m unittest discover -s tests -q", name = "tests-pass" },
+  { kind = "command", cmd = "git diff --quiet wrangler-baseline -- tests", name = "tests-untouched" },
+  { kind = "diff_size", max = 20 },
+]

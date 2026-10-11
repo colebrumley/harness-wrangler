@@ -1,0 +1,4 @@
+name = "mock-suite"
+description = "Offline regression demo. Run it on two fake models: `mock-sonnet` then `mock-opus`."
+primary_metric = "judge_score"
+experiments = ["mock-demo"]

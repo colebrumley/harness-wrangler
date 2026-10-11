@@ -1,0 +1,8 @@
+commit a1f3 Add CSV export to the reports page (reports: #412)
+commit b772 Fix crash when a report has zero rows (#431)
+commit c90e Bump lodash 4.17.20 -> 4.17.21
+commit d004 Reports page loads 3x faster for accounts with >10k rows: paginate server-side (#398)
+commit e5a9 Rename internal ReportBuilder to ReportAssembler (no behavior change)
+commit f6b1 BREAKING: remove the deprecated /v1/reports endpoint; use /v2/reports (#377)
+commit 07cd Fix timezone bug: scheduled reports sent one hour late during DST (#440)
+commit 18de Update CI to node 22

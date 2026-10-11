@@ -1,0 +1,10 @@
+id = "mock-alpha"
+prompt = "Summarize INCIDENT.md into SUMMARY.md"
+fixture = { dir = "fixtures/incident-report" }
+output_file = "SUMMARY.md"
+expected_output = "A short summary"
+expectations = ["Leads with impact", "Under 150 words", "No hedging"]
+tags = ["mock"]
+
+[graders]
+deterministic = [{ kind = "word_count", path = "SUMMARY.md", max = 130 }]

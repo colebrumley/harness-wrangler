@@ -1,0 +1,100 @@
+name = "plain-ablation"
+description = "Section ablation of overlays/mock-plain/.claude/skills/plain/SKILL.md (split at heading depth 2)"
+runs_per_cell = 6
+timeout_secs = 900
+isolation = "workspace"
+network = "full"
+
+[runner]
+kind = "mock"
+concurrency = 3
+max_retries = 4
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+
+[[factors.levels]]
+value = "overlays/none"
+label = "none"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/full"
+label = "full"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/without-01-plain-writing"
+label = "−Plain writing"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/without-02-lead-with-impact"
+label = "−Lead with impact"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/without-03-cut-hedges"
+label = "−Cut hedges"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/without-04-add-flourish"
+label = "−Add flourish"
+
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/description-only"
+label = "description-only"
+
+[tasks]
+include = ["tasks/mock/*.toml"]
+
+[graders.default.judge]
+model = "mock"
+rubric_scoring = true
+pairwise = false
+
+[ablation]
+source = "overlays/mock-plain/.claude/skills/plain/SKILL.md"
+kind = "skill"
+depth = 2
+factor = "overlay"
+baseline = "overlays/none"
+full = "overlays/ablation/plain-ablation/full"
+description_only = "overlays/ablation/plain-ablation/description-only"
+
+[[ablation.sections]]
+index = 0
+title = "Plain writing"
+overlay = "overlays/ablation/plain-ablation/without-01-plain-writing"
+est_tokens = 42
+lines = [
+    5,
+    11,
+]
+
+[[ablation.sections]]
+index = 1
+title = "Lead with impact"
+overlay = "overlays/ablation/plain-ablation/without-02-lead-with-impact"
+est_tokens = 10
+lines = [
+    12,
+    15,
+]
+
+[[ablation.sections]]
+index = 2
+title = "Cut hedges"
+overlay = "overlays/ablation/plain-ablation/without-03-cut-hedges"
+est_tokens = 8
+lines = [
+    16,
+    19,
+]
+
+[[ablation.sections]]
+index = 3
+title = "Add flourish"
+overlay = "overlays/ablation/plain-ablation/without-04-add-flourish"
+est_tokens = 9
+lines = [
+    20,
+    22,
+]

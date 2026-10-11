@@ -1,0 +1,32 @@
+name = "rfw-effort"
+description = "Does rfw help on Opus 5.5 and Sonnet 5.5, and does effort matter?"
+runs_per_cell = 5
+timeout_secs = 900
+isolation = "seatbelt"
+primary_metric = "judge_score"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/rfw-v1.1.0"]
+
+[[factors]]
+name = "model"
+kind = "model"
+levels = ["claude-opus-5-5", "claude-sonnet-5-5"]
+
+[[factors]]
+name = "effort"
+kind = "effort"
+levels = ["medium", "high"]
+
+[tasks]
+include = ["tasks/writing/*.toml"]
+
+[graders.default]
+judge = { model = "claude-opus-5-5", rubric = "rubrics/reader-first.md", pairwise = true }
+human = { enabled = true }

@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS launches (
   created_at TEXT NOT NULL,
   finished_at TEXT,
   suite TEXT,
-  note TEXT NOT NULL DEFAULT ''
+  note TEXT NOT NULL DEFAULT '',
+  pid INTEGER
 );
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,9 +380,11 @@ impl Store {
 
     pub fn set_launch_status(&self, id: i64, status: &str, phase: &str) -> Result<()> {
         let finished = matches!(status, "done" | "failed" | "cancelled").then(now);
+        // The owning process is recorded so a crash can be told from a live run.
+        let pid = (status == "running").then(|| std::process::id() as i64);
         self.c().execute(
-            "UPDATE launches SET status = ?2, phase = ?3, finished_at = COALESCE(?4, finished_at) WHERE id = ?1",
-            params![id, status, phase, finished],
+            "UPDATE launches SET status = ?2, phase = ?3, finished_at = COALESCE(?4, finished_at), pid = ?5 WHERE id = ?1",
+            params![id, status, phase, finished, pid],
         )?;
         Ok(())
     }
@@ -393,19 +396,26 @@ impl Store {
         Ok(())
     }
 
-    /// Mark launches left `running` by a dead process as interrupted.
-    pub fn mark_stale(&self, live: &[i64]) -> Result<()> {
+    /// Mark launches left `running` by a process that no longer exists as
+    /// interrupted, and put their in-flight runs back to pending.
+    pub fn mark_stale(&self) -> Result<Vec<i64>> {
         let c = self.c();
-        let ids: Vec<i64> = {
-            let mut s = c.prepare("SELECT id FROM launches WHERE status = 'running'")?;
-            let v = s.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        let rows: Vec<(i64, Option<i64>)> = {
+            let mut s = c.prepare("SELECT id, pid FROM launches WHERE status = 'running'")?;
+            let v = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             v
         };
-        for id in ids.into_iter().filter(|i| !live.contains(i)) {
-            c.execute("UPDATE runs SET status = 'pending' WHERE launch_id = ?1 AND status = 'running'", [id])?;
-            c.execute("UPDATE launches SET status = 'interrupted', phase = '' WHERE id = ?1", [id])?;
+        let mut stale = vec![];
+        for (id, pid) in rows {
+            // SAFETY: signal 0 only checks that the process exists.
+            let alive = pid.map(|p| p == std::process::id() as i64 || unsafe { libc::kill(p as i32, 0) } == 0).unwrap_or(false);
+            if !alive {
+                c.execute("UPDATE runs SET status = 'pending' WHERE launch_id = ?1 AND status = 'running'", [id])?;
+                c.execute("UPDATE launches SET status = 'interrupted', phase = '', pid = NULL WHERE id = ?1", [id])?;
+                stale.push(id);
+            }
         }
-        Ok(())
+        Ok(stale)
     }
 
     // ---------------------------------------------------------------- runs
@@ -671,9 +681,13 @@ impl Store {
     // ----------------------------------------------------------- baselines
 
     pub fn set_baseline(&self, suite: &str, model: &str, experiment: &str, launch_id: i64) -> Result<()> {
-        self.c().execute(
+        // A model keeps the date it first joined the suite, so rerunning an
+        // older model does not reorder "previous model" comparisons.
+        let c = self.c();
+        let first: Option<String> = c.query_row("SELECT MIN(created_at) FROM baselines WHERE suite = ?1 AND model = ?2", params![suite, model], |r| r.get(0))?;
+        c.execute(
             "INSERT OR REPLACE INTO baselines (suite, model, experiment, launch_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![suite, model, experiment, launch_id, now()],
+            params![suite, model, experiment, launch_id, first.unwrap_or_else(now)],
         )?;
         Ok(())
     }

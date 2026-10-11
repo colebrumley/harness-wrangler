@@ -1,0 +1,4 @@
+name = "writing-skills"
+description = "Writing patterns tracked across models."
+primary_metric = "judge_score"
+experiments = ["rfw-writing"]

@@ -1,0 +1,23 @@
+name = "terse-coding"
+description = "Does a short working-agreements CLAUDE.md change a bugfix task? Graded by the tests and diff size."
+runs_per_cell = 5
+timeout_secs = 600
+isolation = "seatbelt"
+network = "anthropic"
+primary_metric = "pass"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+model = "claude-haiku-5-5"
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/terse"]
+
+[tasks]
+include = ["tasks/coding/*.toml"]
+
+[graders.default]
+judge = { model = "claude-sonnet-5-5" }

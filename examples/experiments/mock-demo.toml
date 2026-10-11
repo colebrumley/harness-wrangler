@@ -1,0 +1,26 @@
+# Offline demo: the mock runner and mock judge spend no tokens and have a
+# known answer (mock-plain helps, mock-noisy hurts, high effort costs more).
+name = "mock-demo"
+description = "Offline demo on the mock runner: does the plain skill help, and does effort matter?"
+runs_per_cell = 5
+
+[runner]
+kind = "mock"
+concurrency = 4
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/mock-plain", "overlays/mock-noisy"]
+
+[[factors]]
+name = "effort"
+kind = "effort"
+levels = ["medium", "high"]
+
+[tasks]
+include = ["tasks/mock/*.toml"]
+
+[graders.default]
+judge = { model = "mock", rubric = "rubrics/reader-first.md", pairwise = true, pairwise_mode = "baseline" }
+human = { enabled = true }

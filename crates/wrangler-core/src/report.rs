@@ -343,7 +343,8 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
             let mut cell_flaky = vec![];
             for m in &metric_names {
                 let info = stats::metric_info(m);
-                if info.direction != Direction::Higher {
+                // One flag per underlying signal: the headline quality metrics only.
+                if info.direction != Direction::Higher || !(m == "pass" || m == "judge_score" || *m == primary) {
                     continue;
                 }
                 let xs = data.values(m, &in_cell);
@@ -652,7 +653,7 @@ pub fn render_text(r: &Report) -> String {
         for t in &r.tasks {
             let mut row = vec![t.task_id.clone()];
             for c in &t.cells {
-                let star = if c.flaky.is_empty() { "" } else { "*" };
+                let star = if c.flaky.contains(&r.primary_metric) { "*" } else { "" };
                 row.push(c.metrics.get(&r.primary_metric).map(|x| format!("{}{star} (n={})", fmt_value(&pm, x.mean), x.n)).unwrap_or_else(|| "–".into()));
             }
             rows.push(row);

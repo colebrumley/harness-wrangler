@@ -1,0 +1,24 @@
+name = "runner-compare"
+description = "The same CLAUDE.md under Claude Code and Codex. Codex gets it as AGENTS.md."
+runs_per_cell = 3
+timeout_secs = 600
+primary_metric = "pass"
+
+[runner]
+concurrency = 2
+
+[[factors]]
+name = "runner"
+kind = "runner"
+levels = [
+  { value = "claude-code", model = "claude-haiku-5-5" },
+  { value = "codex" },
+]
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/terse"]
+
+[tasks]
+include = ["tasks/coding/*.toml"]

@@ -1,0 +1,20 @@
+id = "incident-summary"
+prompt = "Read INCIDENT.md and write a summary for the #on-call Slack channel. Save it as SUMMARY.md."
+fixture = { dir = "fixtures/incident-report" }
+output_file = "SUMMARY.md"
+expected_output = "A short, plain summary under 150 words leading with impact and current status."
+expectations = [
+  "Leads with user impact (failed checkouts), not with the timeline or the cause",
+  "States the current status: stable after rollback, fix in review",
+  "Is under 150 words",
+  "Contains no hedging phrases such as 'it seems', 'might', 'possibly', 'we believe'",
+  "States that no customer was double charged",
+]
+tags = ["writing", "summary"]
+
+[graders]
+deterministic = [
+  { kind = "file_exists", path = "SUMMARY.md" },
+  { kind = "word_count", path = "SUMMARY.md", max = 150 },
+  { kind = "regex", path = "SUMMARY.md", pattern = "(?i)\\b(it seems|might|possibly|we believe|perhaps)\\b", should_match = false, name = "no-hedging" },
+]

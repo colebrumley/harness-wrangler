@@ -1,0 +1,20 @@
+id = "release-notes"
+prompt = "CHANGES.txt lists the commits in this release. Write customer-facing release notes and save them as RELEASE_NOTES.md."
+fixture = { dir = "fixtures/release" }
+output_file = "RELEASE_NOTES.md"
+expected_output = "Short release notes a customer can scan: the breaking change first, then what is new and what is fixed, with internal-only changes left out."
+expectations = [
+  "The breaking change (removal of /v1/reports) appears first or is clearly called out at the top",
+  "Leaves out internal-only changes: the ReportBuilder rename, the CI node bump, the lodash bump",
+  "Describes changes in terms of what the customer can now do or what stopped going wrong",
+  "Is under 200 words",
+]
+tags = ["writing", "release-notes"]
+
+[graders]
+deterministic = [
+  { kind = "file_exists", path = "RELEASE_NOTES.md" },
+  { kind = "word_count", path = "RELEASE_NOTES.md", max = 200 },
+  { kind = "regex", path = "RELEASE_NOTES.md", pattern = "(?i)ReportAssembler|node 22|lodash", should_match = false, name = "no-internal-changes" },
+  { kind = "regex", path = "RELEASE_NOTES.md", pattern = "(?i)/v2/reports", name = "names-migration-target" },
+]

@@ -1,0 +1,24 @@
+name = "rfw-writing"
+description = "Does reader-first-writing v1.1.0 improve writing tasks? Model comes from [runner] so a suite can pin it."
+runs_per_cell = 5
+timeout_secs = 600
+isolation = "workspace"
+primary_metric = "judge_score"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+model = "claude-haiku-5-5"
+effort = "medium"
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/rfw-v1.1.0"]
+
+[tasks]
+include = ["tasks/writing/*.toml"]
+
+[graders.default]
+judge = { model = "claude-sonnet-5-5", rubric = "rubrics/reader-first.md", pairwise = true }
+human = { enabled = true }
