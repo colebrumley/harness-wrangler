@@ -274,7 +274,10 @@ pub fn parse_stream(raw: &str) -> RunRecord {
                 }
                 m.insert("total_tokens".into(), input_side + output);
                 rec.final_text = ev["result"].as_str().unwrap_or("").to_string();
-                if ev["is_error"].as_bool().unwrap_or(false) || ev["subtype"].as_str().map(|s| s != "success").unwrap_or(false) {
+                if ev["subtype"] == "error_max_turns" {
+                    rec.limit_hit = Some(format!("stopped at the max-turns limit after {} turns", ev["num_turns"]));
+                    rec.final_text = rec.transcript.final_text();
+                } else if ev["is_error"].as_bool().unwrap_or(false) || ev["subtype"].as_str().map(|s| s != "success").unwrap_or(false) {
                     let detail = format!(
                         "{}: {}",
                         ev["subtype"].as_str().unwrap_or("error"),

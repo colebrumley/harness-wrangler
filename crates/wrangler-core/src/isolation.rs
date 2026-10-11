@@ -35,24 +35,21 @@ fn canon(p: &Path) -> PathBuf {
 
 /// Paths outside the workspace that Claude Code writes during a `-p` run
 /// with `--no-session-persistence`. Measured on Claude Code 2.1.296 by
-/// running under a deny-by-default write profile and reading the sandbox
-/// denials; see `docs/isolation.md`.
+/// running under a workspace-only write profile with `--debug-file` and
+/// collecting every EPERM; `docs/isolation.md` has the method and raw list.
 pub fn claude_writable_paths() -> Vec<SbPath> {
     let h = home();
     let uid = unsafe { libc::getuid() };
     vec![
-        // Config, credentials refresh, per-project memory, plugin cache, logs.
+        // shell-snapshots/, session-env/, sessions/ and per-project memory.
+        // Without shell-snapshots the Bash tool cannot start at all.
         SbPath::Subpath(h.join(".claude")),
-        // Global state file and its atomic-write temp/lock/backup siblings.
+        // Global state file with its `.tmp.<pid>.<hex>` and `.lock` siblings.
         SbPath::Prefix(h.join(".claude.json")),
-        SbPath::Subpath(h.join("Library/Caches/claude-cli-nodejs")),
-        // Keychain-backed auth: token refresh rewrites the login keychain.
-        SbPath::Subpath(h.join("Library/Keychains")),
-        // Per-user scratch and IPC sockets.
-        SbPath::Subpath(PathBuf::from(format!("/private/tmp/claude-{uid}"))),
-        SbPath::Subpath(PathBuf::from("/private/tmp/cc-socks")),
+        // Version lock files.
         SbPath::Subpath(h.join(".local/state/claude")),
-        SbPath::Subpath(h.join(".local/share/claude")),
+        // Per-user scratch: the Bash tool's scratchpad and fswatch probes.
+        SbPath::Subpath(PathBuf::from(format!("/private/tmp/claude-{uid}"))),
     ]
 }
 

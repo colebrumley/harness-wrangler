@@ -233,6 +233,9 @@ fn execute_run(
         } else if rec.timed_out {
             events.push(RunEvent { kind: "timeout".into(), at_ms: rec.wall_ms, detail: format!("killed after {}s", limits.timeout.as_secs()) });
             "timeout"
+        } else if let Some(limit) = &rec.limit_hit {
+            events.push(RunEvent { kind: "limit".into(), at_ms: rec.wall_ms, detail: limit.clone() });
+            "timeout"
         } else if rec.error.is_some() {
             "failed"
         } else {
@@ -293,7 +296,7 @@ fn execute_run(
         }
         let error = match (&rec.error, status) {
             (Some(e), _) => e.clone(),
-            (None, "timeout") => format!("timed out after {}s", limits.timeout.as_secs()),
+            (None, "timeout") => rec.limit_hit.clone().unwrap_or_else(|| format!("timed out after {}s", limits.timeout.as_secs())),
             _ => String::new(),
         };
         store.finish_run(

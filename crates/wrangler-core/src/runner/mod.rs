@@ -84,6 +84,9 @@ pub struct RunRecord {
     pub rate_limited: Option<String>,
     /// Set when the runner reported a failure.
     pub error: Option<String>,
+    /// Set when the agent was stopped by a configured limit (max turns). The
+    /// run is graded as it stands, like a timeout.
+    pub limit_hit: Option<String>,
     /// Model the runner reported using.
     pub model: String,
     pub command: Vec<String>,
