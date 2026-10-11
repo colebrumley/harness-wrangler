@@ -62,8 +62,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total
 
 #[test]
 fn docker_isolation_runs_the_runner_in_a_container() {
-    let up = std::process::Command::new("docker").arg("info").output().map(|o| o.status.success()).unwrap_or(false);
-    if !up {
+    if !wrangler_core::isolation::docker_available() {
         eprintln!("skipped: no Docker daemon is running");
         return;
     }

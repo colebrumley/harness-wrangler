@@ -52,7 +52,13 @@ Seatbelt filters by address, not hostname. So `network = "anthropic"` denies all
 
 A subscription login lives in the macOS keychain and does not exist in a container, so the runner must authenticate from an environment variable. `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY` are passed by name when set; `docker_env` replaces that list. Values are never written to the recorded command line. `network = "anthropic"` is not applied here; use `docker_args = ["--network", ...]`.
 
-Tested with a stand-in runner in `alpine`: it ran on Linux in the mounted workspace, could not see host paths outside it, and left no container behind. It has not been run with a real Claude Code image, because this machine has no API key.
+The container runs as your host user with `HOME=/tmp` (override with `--user` in `docker_args`): Claude Code refuses `bypassPermissions` as root, and workspace files keep their owner. Under Docker, Codex runs with `--sandbox danger-full-access`, because its own Linux sandbox cannot create namespaces in an unprivileged container; the container is the boundary.
+
+What was tested, with an image built from `node:22-slim` plus `npm install -g @anthropic-ai/claude-code @openai/codex`:
+
+- A stand-in runner in `alpine` ran on Linux in the mounted workspace, could not see host paths outside it, and left no container behind.
+- Real Codex ran a task end to end in the container, authenticated through the read-only `auth.json` mount.
+- Real Claude Code started in the container and stopped at "Not logged in", which is recorded as a failed run with that message. A full Claude Code run under Docker needs `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, and this machine has neither.
 
 ## Budget
 

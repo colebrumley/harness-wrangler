@@ -282,11 +282,13 @@ pub fn parse_stream(raw: &str) -> RunRecord {
                     rec.limit_hit = Some(format!("stopped at the max-turns limit after {} turns", ev["num_turns"]));
                     rec.final_text = rec.transcript.final_text();
                 } else if ev["is_error"].as_bool().unwrap_or(false) || ev["subtype"].as_str().map(|s| s != "success").unwrap_or(false) {
-                    let detail = format!(
-                        "{}: {}",
-                        ev["subtype"].as_str().unwrap_or("error"),
-                        if rec.final_text.is_empty() { ev["terminal_reason"].as_str().unwrap_or("") } else { &rec.final_text }
-                    );
+                    let body = if rec.final_text.is_empty() { ev["terminal_reason"].as_str().unwrap_or("") } else { &rec.final_text };
+                    // An error reported with subtype "success" (for example
+                    // "Not logged in") reads better without the prefix.
+                    let detail = match ev["subtype"].as_str() {
+                        Some("success") | None => body.to_string(),
+                        Some(sub) => format!("{sub}: {body}"),
+                    };
                     let status = ev["api_error_status"].as_i64().unwrap_or(0);
                     if status == 429 || status == 529 || (ev["is_error"].as_bool().unwrap_or(false) && looks_rate_limited(&rec.final_text)) {
                         rec.rate_limited = Some(detail.clone());

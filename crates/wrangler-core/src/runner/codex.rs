@@ -27,9 +27,12 @@ impl CodexRunner {
     }
 
     pub fn build_args(&self, ws: &Workspace, task: &Task, variant: &Variant, limits: &Limits) -> Vec<String> {
-        // Codex confines model-run commands with its own seatbelt sandbox, so
-        // that is the isolation primitive here at every ladder level.
-        let sandbox = limits.cfg.codex_sandbox.clone().unwrap_or_else(|| "workspace-write".into());
+        // On the host Codex confines model-run commands with its own seatbelt
+        // sandbox, so that is the isolation primitive below the docker level.
+        // In a container Codex's Linux sandbox cannot create namespaces, and
+        // the container (workspace-only mounts) is the boundary instead.
+        let default = if limits.isolation == Isolation::Docker { "danger-full-access" } else { "workspace-write" };
+        let sandbox = limits.cfg.codex_sandbox.clone().unwrap_or_else(|| default.into());
         let mut a: Vec<String> = vec!["exec".into(), "--json".into(), "--sandbox".into(), sandbox, "--skip-git-repo-check".into(), "--ephemeral".into()];
         a.extend(["-C".into(), ws.dir.to_string_lossy().to_string()]);
         if let Some(m) = &variant.model {

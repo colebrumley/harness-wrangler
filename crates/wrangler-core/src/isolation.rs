@@ -169,6 +169,25 @@ pub fn docker_args(name: &str, image: &str, workspace: &Path, mounts: &[(PathBuf
     a
 }
 
+/// Is a Docker daemon answering? Time-boxed: a daemon that is starting or
+/// stuck makes `docker info` hang, and validation must not hang with it.
+pub fn docker_available() -> bool {
+    let child = std::process::Command::new("docker").arg("info").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    let Ok(mut child) = child else { return false };
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 impl DockerRun {
     /// Rewrite the command to run in a container, or `None` below the docker level.
     /// `mounts` are extra host paths (path, read_only) the runner needs inside.
@@ -183,7 +202,16 @@ impl DockerRun {
         for p in &limits.cfg.plugin_dirs {
             all_mounts.push((ws.project.abs(p), true));
         }
-        spec.args = docker_args(&name, &image, &ws.dir, &all_mounts, &spec.env, &pass, &limits.cfg.docker_args, &spec.program, &spec.args);
+        // Run as the host user, not root: files in the mounted workspace keep
+        // their owner, and Claude Code refuses bypassPermissions as root.
+        // HOME points somewhere any uid can write.
+        let mut extra: Vec<String> = vec![];
+        if !limits.cfg.docker_args.iter().any(|a| a == "--user" || a == "-u" || a.starts_with("--user=")) {
+            let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+            extra.extend(["--user".into(), format!("{uid}:{gid}"), "-e".into(), "HOME=/tmp".into()]);
+        }
+        extra.extend(limits.cfg.docker_args.iter().cloned());
+        spec.args = docker_args(&name, &image, &ws.dir, &all_mounts, &spec.env, &pass, &extra, &spec.program, &spec.args);
         spec.program = "docker".into();
         spec.env.clear();
         Ok(Some(DockerRun { name }))
