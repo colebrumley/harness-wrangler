@@ -2,7 +2,7 @@
 //! from the store on demand.
 
 use crate::model::*;
-use crate::stats::{self, Bout, BtItem, Direction, Effect, MetricInfo, Summary, Verdict};
+use crate::stats::{self, Bout, BtItem, Contrast, Direction, Effect, MetricInfo, Summary, Verdict};
 use crate::store::{Judgment, Launch, RunRow, Store};
 use crate::util::hash_u64;
 use anyhow::Result;
@@ -52,6 +52,23 @@ pub struct Comparison {
     pub metric: String,
     #[serde(flatten)]
     pub effect: Effect,
+}
+
+/// The effect of one factor's level within a single level of another factor:
+/// "what does the skill do on this model?" With `vs_first`, how that effect
+/// differs from the same effect at the other factor's first level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conditional {
+    pub factor: String,
+    pub baseline: String,
+    pub level: String,
+    pub by_factor: String,
+    pub by_level: String,
+    pub metric: String,
+    #[serde(flatten)]
+    pub effect: Effect,
+    pub vs_first: Option<Contrast>,
+    pub first_level: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +198,8 @@ pub struct Report {
     pub factors: Vec<FactorInfo>,
     pub variants: Vec<VariantSummary>,
     pub comparisons: Vec<Comparison>,
+    /// Each factor's effect within each level of every other factor.
+    pub conditional: Vec<Conditional>,
     pub tasks: Vec<TaskBreakdown>,
     pub flaky: Vec<Flaky>,
     pub pairwise: Option<Pairwise>,
@@ -250,6 +269,12 @@ impl Data {
     /// `control`, pairing on the unit key (task, plus whatever else the
     /// caller holds fixed).
     pub fn effect(&self, metric: &str, control: &dyn Fn(&RunRow) -> bool, treat: &dyn Fn(&RunRow) -> bool, unit: &dyn Fn(&RunRow) -> String) -> Option<Effect> {
+        let units = self.units(metric, control, treat, unit);
+        stats::paired_effect(&units, &stats::metric_info(metric), hash_u64(&format!("{}|{metric}", self.launch.id)))
+    }
+
+    /// Control and treatment values grouped by pairing unit.
+    pub fn units(&self, metric: &str, control: &dyn Fn(&RunRow) -> bool, treat: &dyn Fn(&RunRow) -> bool, unit: &dyn Fn(&RunRow) -> String) -> Vec<(Vec<f64>, Vec<f64>)> {
         let mut units: BTreeMap<String, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
         for r in &self.runs {
             let Some(v) = self.metrics.get(&r.id).and_then(|m| m.get(metric)).copied() else { continue };
@@ -259,8 +284,19 @@ impl Data {
                 units.entry(unit(r)).or_default().1.push(v);
             }
         }
-        let units: Vec<(Vec<f64>, Vec<f64>)> = units.into_values().collect();
-        stats::paired_effect(&units, &stats::metric_info(metric), hash_u64(&format!("{}|{metric}", self.launch.id)))
+        units.into_values().collect()
+    }
+
+    /// Units for one factor level against its baseline, within one level of
+    /// another factor, paired by task and whatever factors remain.
+    pub fn conditional_units(&self, metric: &str, factor: &str, base: &str, level: &str, by: &str, by_level: &str) -> Vec<(Vec<f64>, Vec<f64>)> {
+        let label = |r: &RunRow, f: &str| self.variant(&r.variant_key).and_then(|v| v.level_label(f)).map(|s| s.to_string());
+        let rest = |r: &RunRow| {
+            let others = self.variant(&r.variant_key).map(|v| v.levels.iter().filter(|(n, _)| n != factor && n != by).map(|(n, l)| format!("{n}={}", l.label)).collect::<Vec<_>>().join("|")).unwrap_or_default();
+            format!("{}#{others}", r.task_id)
+        };
+        let here = |r: &RunRow| label(r, by).as_deref() == Some(by_level);
+        self.units(metric, &|r| here(r) && label(r, factor).as_deref() == Some(base), &|r| here(r) && label(r, factor).as_deref() == Some(level), &rest)
     }
 
     /// Effect of one overlay-factor level against another, paired by task
@@ -328,6 +364,29 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
             for m in &metric_names {
                 if let Some(effect) = data.effect(m, &|r| r.variant_key == base.key, &|r| r.variant_key == v.key, &|r| r.task_id.clone()) {
                     comparisons.push(Comparison { kind: "variant".into(), factor: None, baseline: base.label.clone(), level: v.label.clone(), variant_key: Some(v.key.clone()), metric: m.clone(), effect });
+                }
+            }
+        }
+    }
+
+    // Does a factor behave differently across the levels of another factor?
+    let mut conditional = vec![];
+    let cond_metrics: Vec<String> = metric_names.iter().filter(|m| **m == primary || ["pass", "judge_score", "expectations_passed", "cost_usd", "wall_time_s"].contains(&m.as_str())).cloned().collect();
+    for f in &exp.factors {
+        let f_labels: Vec<String> = f.levels.iter().map(|l| l.label()).collect();
+        for g in exp.factors.iter().filter(|g| g.name != f.name) {
+            let g_labels: Vec<String> = g.levels.iter().map(|l| l.label()).collect();
+            for level in f_labels.iter().skip(1) {
+                for m in &cond_metrics {
+                    let info = stats::metric_info(m);
+                    let first_units = data.conditional_units(m, &f.name, &f_labels[0], level, &g.name, &g_labels[0]);
+                    for (gi, g_level) in g_labels.iter().enumerate() {
+                        let units = if gi == 0 { first_units.clone() } else { data.conditional_units(m, &f.name, &f_labels[0], level, &g.name, g_level) };
+                        let tag = format!("cond|{}|{level}|{}|{g_level}|{m}", f.name, g.name);
+                        let Some(effect) = stats::paired_effect(&units, &info, seed(&tag)) else { continue };
+                        let vs_first = if gi == 0 { None } else { stats::effect_difference(&first_units, &units, seed(&format!("{tag}|diff"))) };
+                        conditional.push(Conditional { factor: f.name.clone(), baseline: f_labels[0].clone(), level: level.clone(), by_factor: g.name.clone(), by_level: g_level.clone(), metric: m.clone(), effect, vs_first, first_level: g_labels[0].clone() });
+                    }
                 }
             }
         }
@@ -417,6 +476,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         factors: exp.factors.iter().map(|f| FactorInfo { name: f.name.clone(), kind: f.kind.as_str().into(), levels: f.levels.iter().map(|l| l.label()).collect() }).collect(),
         variants,
         comparisons,
+        conditional,
         tasks,
         flaky,
         pairwise,
@@ -645,6 +705,26 @@ pub fn render_text(r: &Report) -> String {
         for c in cs {
             let i = info(&c.metric);
             rows.push(vec![c.level.clone(), i.label.clone(), fmt_effect(&i, &c.effect), c.effect.rel.map(|x| format!("{:+.0}%", x * 100.0)).unwrap_or_default(), c.effect.units.to_string()]);
+        }
+        s.push_str(&table(&rows));
+    }
+
+    // Per-level view, for pattern-like factors: what does the overlay do on each model?
+    let mut seen = BTreeSet::new();
+    for c in r.conditional.iter().filter(|c| c.metric == r.primary_metric) {
+        let kind = |name: &str| r.factors.iter().find(|f| f.name == name).map(|f| f.kind.as_str()).unwrap_or("");
+        if !matches!(kind(&c.factor), "overlay" | "system_prompt_append") || !seen.insert((c.factor.clone(), c.level.clone(), c.by_factor.clone())) {
+            continue;
+        }
+        let i = info(&c.metric);
+        s.push_str(&format!("\n{} \"{}\" WITHIN EACH {} ({}; vs \"{}\")\n", c.factor.to_uppercase(), c.level, c.by_factor.to_uppercase(), i.label, c.baseline));
+        let mut rows = vec![vec![c.by_factor.clone(), "effect [95% CI]".into(), "without → with".into(), format!("difference from {}", c.first_level)]];
+        for x in r.conditional.iter().filter(|x| x.metric == c.metric && x.factor == c.factor && x.level == c.level && x.by_factor == c.by_factor) {
+            let diff = match &x.vs_first {
+                None => "(reference)".to_string(),
+                Some(d) => format!("{} [{}, {}] {}", fmt_delta(&i, d.diff), fmt_delta(&i, d.ci_low), fmt_delta(&i, d.ci_high), if d.differs { "differs" } else { "not distinguishable" }),
+            };
+            rows.push(vec![x.by_level.clone(), fmt_effect(&i, &x.effect), format!("{} → {}", fmt_value(&i, x.effect.base_mean), fmt_value(&i, x.effect.treat_mean)), diff]);
         }
         s.push_str(&table(&rows));
     }

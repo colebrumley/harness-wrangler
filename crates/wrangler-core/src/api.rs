@@ -68,6 +68,23 @@ judge = { model = "claude-opus-5-5", pairwise = true }
 human = { enabled = true }
 "#;
 
+pub const TASK_TEMPLATE: &str = r#"id = "my-task"
+prompt = "What the agent is asked to do. Say where to save the result if it is a file."
+# fixture = { dir = "fixtures/my-task" }   # files the agent starts with
+# output_file = "RESULT.md"                # what judges and reviewers read; default is the final message
+expected_output = "One or two sentences describing a good result."
+expectations = [
+  "A specific, checkable statement about a good result",
+]
+tags = []
+
+[graders]
+deterministic = [
+  # { kind = "word_count", path = "RESULT.md", max = 200 },
+  # { kind = "command", cmd = "python3 -m unittest discover -s tests -q" },
+]
+"#;
+
 impl Api {
     pub fn new(project: Project) -> Result<Arc<Api>> {
         let store = Arc::new(Store::open(&project.db_path())?);
@@ -213,7 +230,16 @@ impl Api {
                 std::fs::write(path, text)?;
                 json!({"ok": true})
             }
-            "overlays_list" => json!(p.list_overlays()),
+            "overlays_list" => {
+                let mut all = p.list_overlays();
+                all.extend(p.list_skill_dirs());
+                json!(all)
+            }
+            "task_template" => json!({"toml": TASK_TEMPLATE}),
+            "task_delete" => {
+                std::fs::remove_file(self.task_path(&arg::<String>(args, "source")?)?)?;
+                json!({"ok": true})
+            }
 
             // --------------------------------------------------- launches
             "launch_start" => {

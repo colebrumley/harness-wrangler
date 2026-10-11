@@ -118,6 +118,14 @@ impl Workspace {
     /// Copy an overlay directory's contents over the workspace.
     pub fn apply_overlay(&self, overlay: &str) -> Result<()> {
         let src = self.project.abs(overlay);
+        // A bare skill directory (SKILL.md at its root) is installed as a
+        // project skill, so an experiment can point at a skill where it
+        // lives in the repo instead of a copy laid out as an overlay.
+        if src.join("SKILL.md").is_file() {
+            let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "skill".into());
+            let dst = self.dir.join(".claude/skills").join(name);
+            return copy_dir_contents(&src, &dst).with_context(|| format!("installing skill {overlay}"));
+        }
         copy_dir_contents(&src, &self.dir).with_context(|| format!("materializing overlay {overlay}"))?;
         let _ = std::fs::remove_file(self.dir.join(".gitkeep"));
         Ok(())
@@ -217,6 +225,13 @@ mod tests {
         assert!(ws.read_file("../x").is_none());
         ws.reset_to_baseline().unwrap();
         assert!(!ws.dir.join("new.md").exists());
+        // A bare skill directory used as an overlay is installed as a project skill.
+        std::fs::create_dir_all(root.join("plugins/p/skills/my-skill/references")).unwrap();
+        std::fs::write(root.join("plugins/p/skills/my-skill/SKILL.md"), "---\nname: my-skill\n---\nbody").unwrap();
+        std::fs::write(root.join("plugins/p/skills/my-skill/references/r.md"), "ref").unwrap();
+        ws.apply_overlay("plugins/p/skills/my-skill").unwrap();
+        assert!(ws.dir.join(".claude/skills/my-skill/SKILL.md").exists() && ws.dir.join(".claude/skills/my-skill/references/r.md").exists());
+        assert!(!ws.dir.join("SKILL.md").exists());
         ws.remove();
         assert!(!ws.dir.exists());
     }

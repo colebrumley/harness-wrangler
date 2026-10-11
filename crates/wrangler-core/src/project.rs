@@ -200,7 +200,7 @@ impl Project {
         for pat in &exp.tasks.include {
             let found = glob_sorted(&self.root, pat);
             if found.is_empty() {
-                bail!("task pattern `{pat}` matched no files");
+                bail!("No task files match `{pat}` yet. Add a task under tasks/ (in the app: Experiments, then Tasks), or change the pattern.");
             }
             paths.extend(found);
         }
@@ -245,6 +245,24 @@ impl Project {
         out
     }
 
+    /// Skill directories anywhere in the project (outside overlays/), usable
+    /// directly as overlay levels.
+    pub fn list_skill_dirs(&self) -> Vec<String> {
+        let mut out = vec![];
+        let walker = walkdir::WalkDir::new(&self.root).max_depth(6).sort_by_file_name().into_iter().filter_entry(|e| {
+            let n = e.file_name().to_string_lossy();
+            !(n == ".git" || n == "node_modules" || n == "target" || n == ".wrangler" || n == "overlays")
+        });
+        for e in walker.flatten() {
+            if e.file_type().is_file() && e.file_name() == "SKILL.md" {
+                if let Some(dir) = e.path().parent() {
+                    out.push(self.rel(dir));
+                }
+            }
+        }
+        out
+    }
+
     pub fn suite_path(&self, name: &str) -> PathBuf {
         self.root.join("suites").join(format!("{name}.toml"))
     }
@@ -281,7 +299,7 @@ impl Project {
         let mut warnings = vec![];
         let tasks = self.load_tasks(exp)?;
         if tasks.is_empty() {
-            bail!("experiment selects no tasks (set [tasks] include)");
+            bail!("This experiment selects no tasks yet. Set [tasks] include to a pattern such as tasks/**/*.toml.");
         }
         for f in &exp.factors {
             for l in &f.levels {

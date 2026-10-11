@@ -23,7 +23,10 @@ export default function Experiments({ ctx, selected, sub }: { ctx: Ctx; selected
     <div className="content">
       <div className="split" style={{ maxWidth: 1320 }}>
         <div className="stack">
-          <button className="btn primary" onClick={() => ctx.go("/experiments/new")}>New experiment</button>
+          <div className="row">
+            <button className="btn primary grow" onClick={() => ctx.go("/experiments/new")}>New experiment</button>
+            <button className={`btn ${selected === "~tasks" ? "primary" : ""}`} onClick={() => ctx.go("/experiments/~tasks")}>Tasks</button>
+          </div>
           <section className="panel">
             <div className="list">
               {items.map((e) => (
@@ -44,13 +47,20 @@ export default function Experiments({ ctx, selected, sub }: { ctx: Ctx; selected
           <ErrorNote error={list.error} />
         </div>
         <div className="stack" style={{ minWidth: 0 }}>
+          {selected === "~tasks" && <Tasks ctx={ctx} />}
           {selected === "new" && <Editor name={null} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
-          {selected && selected !== "new" && sub === "edit" && <Editor name={selected} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
-          {selected && selected !== "new" && sub !== "edit" && <Detail name={selected} ctx={ctx} onChanged={list.reload} />}
+          {selected && selected !== "new" && selected !== "~tasks" && sub === "edit" && <Editor name={selected} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
+          {selected && selected !== "new" && selected !== "~tasks" && sub !== "edit" && <Detail name={selected} ctx={ctx} onChanged={list.reload} />}
           {!selected && list.data && items.length === 0 && (
-            <Empty title="Start with an experiment">
-              An experiment crosses factors (overlays, models, effort) over a set of tasks and runs each cell several times.
-              Create one here, or add a file under <code>experiments/</code>.
+            <Empty title="This project is empty, which is the normal starting point">
+              <p style={{ maxWidth: "62ch", margin: "0 auto 14px" }}>
+                Two things make an experiment: tasks (what the agent is asked to do) and factors (what you vary between runs, such as a skill, a model or an effort level).
+                Start with a task, then create the experiment.
+              </p>
+              <div className="row" style={{ justifyContent: "center" }}>
+                <button className="btn primary" onClick={() => ctx.go("/experiments/~tasks")}>Add a task</button>
+                <button className="btn" onClick={() => ctx.go("/experiments/new")}>New experiment</button>
+              </div>
             </Empty>
           )}
         </div>
@@ -295,7 +305,11 @@ function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved
           <button className="btn primary" disabled={!check?.ok} onClick={save}>Save experiment</button>
         </div>
       </div>
-      {check && !check.ok && <div className="note err">{check.error}</div>}
+      {check && !check.ok && (/no task files match|selects no tasks/i.test(check.error)
+        ? <div className="note warn">{check.error} <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => ctx.go("/experiments/~tasks")}>Open Tasks</button></div>
+        : /has no levels/.test(check.error)
+          ? <div className="note warn">A factor has no levels yet. Add at least two values to it below: the first is the baseline, the others are compared against it.</div>
+          : <div className="note err">{check.error}</div>)}
       {check?.ok && <div className="note">{check.variants.length} variants × {check.tasks} tasks × {check.def.runs_per_cell} runs = {check.total_runs} runs. Saved as <code>experiments/{check.def.name}.toml</code>.</div>}
       {(check?.warnings ?? []).map((w: string) => <div key={w} className="note warn">{w}</div>)}
       <ErrorNote error={error} />
@@ -357,52 +371,69 @@ function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved
                   <option value="mock">Mock (offline)</option>
                 </select>
               </label>
-              <label className="field">Model<input type="text" placeholder="runner default" value={def.runner.model ?? ""} onChange={(e) => patch((d) => { d.runner.model = e.target.value || undefined; })} /></label>
-              <label className="field">Effort
-                <select value={def.runner.effort ?? ""} onChange={(e) => patch((d) => { d.runner.effort = e.target.value || undefined; })}>
-                  <option value="">Runner default</option>
-                  {["low", "medium", "high", "xhigh", "max"].map((x) => <option key={x}>{x}</option>)}
-                </select>
-              </label>
+              {(def.factors ?? []).some((f: any) => f.kind === "model")
+                ? <label className="field">Model<input type="text" disabled value="set by the model factor below" /></label>
+                : <label className="field">Model<input type="text" placeholder="runner default" value={def.runner.model ?? ""} onChange={(e) => patch((d) => { d.runner.model = e.target.value || undefined; })} /></label>}
+              {(def.factors ?? []).some((f: any) => f.kind === "effort")
+                ? <label className="field">Effort<input type="text" disabled value="set by the effort factor below" /></label>
+                : (
+                  <label className="field">Effort
+                    <select value={def.runner.effort ?? ""} onChange={(e) => patch((d) => { d.runner.effort = e.target.value || undefined; })}>
+                      <option value="">Runner default</option>
+                      {["low", "medium", "high", "xhigh", "max"].map((x) => <option key={x}>{x}</option>)}
+                    </select>
+                  </label>
+                )}
               <label className="field">Runs at a time<input type="number" min={1} max={16} value={def.runner.concurrency} onChange={(e) => patch((d) => { d.runner.concurrency = Math.max(1, Number(e.target.value) || 1); })} /></label>
               <label className="field">Max turns<input type="number" min={1} placeholder="no limit" value={def.runner.max_turns ?? ""} onChange={(e) => patch((d) => { d.runner.max_turns = e.target.value ? Number(e.target.value) : undefined; })} /></label>
             </div>
           </Panel>
 
-          <Panel title="Factors" sub="Every combination of levels becomes a variant. The first level of each factor is its baseline."
-            actions={<button className="btn sm" onClick={() => patch((d) => { d.factors = [...(d.factors ?? []), { name: `factor${(d.factors?.length ?? 0) + 1}`, kind: "overlay", levels: ["overlays/none"] }]; })}>Add factor</button>}>
+          <Panel title="Factors" sub="A factor is one thing you vary. Each factor has levels (its values); every combination of levels is run on every task.">
             <div className="stack">
-              {(def.factors ?? []).length === 0 && <p className="muted">No factors yet. Add one to compare something.</p>}
+              {(def.factors ?? []).length === 0 && <p className="muted">No factors yet. Add what you want to compare: for example a skill against no skill, or three models.</p>}
               {(def.factors ?? []).map((f: any, i: number) => {
                 const plain = f.levels.every((l: any) => typeof l === "string");
+                const help = FACTOR_HELP[f.kind];
                 return (
-                  <div key={i} className="stack tight" style={{ borderBottom: "1px solid var(--rule)", paddingBottom: 12 }}>
-                    <div className="row wrap">
-                      <label className="field">Name<input type="text" value={f.name} onChange={(e) => patch((d) => { d.factors[i].name = e.target.value; })} /></label>
-                      <label className="field">Kind
-                        <select value={f.kind} onChange={(e) => patch((d) => { d.factors[i].kind = e.target.value; })}>
+                  <div key={i} className="stack tight" style={{ borderBottom: "1px solid var(--rule)", paddingBottom: 14 }}>
+                    <div className="row wrap top">
+                      <label className="field">What varies
+                        <select value={f.kind} onChange={(e) => patch((d) => {
+                          const kind = e.target.value;
+                          const wasDefault = !d.factors[i].name || FACTOR_KINDS.some(([id]) => id === d.factors[i].name) || /^factor\d+$/.test(d.factors[i].name);
+                          d.factors[i].kind = kind;
+                          d.factors[i].levels = FACTOR_HELP[kind].start;
+                          if (wasDefault) d.factors[i].name = FACTOR_HELP[kind].name;
+                        })}>
                           {FACTOR_KINDS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                         </select>
                       </label>
+                      <label className="field">Name in reports<input type="text" value={f.name} onChange={(e) => patch((d) => { d.factors[i].name = e.target.value; })} /></label>
                       {f.kind === "knob" && <label className="field">CLI flag<input type="text" placeholder="--max-turns" value={f.flag ?? ""} onChange={(e) => patch((d) => { d.factors[i].flag = e.target.value || undefined; })} /></label>}
                       {f.kind === "knob" && <label className="field">or env var<input type="text" value={f.env ?? ""} onChange={(e) => patch((d) => { d.factors[i].env = e.target.value || undefined; })} /></label>}
                       <span className="grow" />
                       <button className="btn quiet danger sm" onClick={() => patch((d) => { d.factors.splice(i, 1); })}>Remove factor</button>
                     </div>
                     {plain ? (
-                      <LevelsBox levels={f.levels} onCommit={(levels) => patch((d) => { d.factors[i].levels = levels; })} />
+                      <LevelChips
+                        kind={f.kind}
+                        levels={f.levels}
+                        help={help}
+                        suggestions={f.kind === "overlay" ? ["overlays/none", ...(overlays.data ?? []).filter((o) => !o.includes("/ablation/") && !o.endsWith("/none"))] : help.suggest}
+                        onChange={(levels) => patch((d) => { d.factors[i].levels = levels; })}
+                      />
                     ) : <p className="muted small">These levels carry labels or per-level settings. Edit them in the TOML tab.</p>}
-                    {f.kind === "overlay" && plain && (
-                      <div className="row wrap small" style={{ gap: 6 }}>
-                        <span className="muted">Add overlay:</span>
-                        {(overlays.data ?? []).filter((o) => !f.levels.includes(o) && !o.includes("/ablation/")).slice(0, 14).map((o) => (
-                          <button key={o} className="btn sm" onClick={() => patch((d) => { d.factors[i].levels.push(o); })}>{o.replace(/^overlays\//, "")}</button>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 );
               })}
+              <div className="row wrap">
+                <span className="muted small">Add a factor:</span>
+                {FACTOR_KINDS.map(([id, label]) => (
+                  <button key={id} className="btn sm" disabled={["model", "effort", "runner"].includes(id) && (def.factors ?? []).some((f: any) => f.kind === id)}
+                    onClick={() => patch((d) => { d.factors = [...(d.factors ?? []), { name: uniqueName(d.factors ?? [], FACTOR_HELP[id].name), kind: id, levels: FACTOR_HELP[id].start }]; })}>{label.split(" (")[0]}</button>
+                ))}
+              </div>
             </div>
           </Panel>
 
@@ -424,6 +455,130 @@ function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved
             </div>
           </Panel>
         </>
+      )}
+    </>
+  );
+}
+
+interface FactorHelp { name: string; start: string[]; suggest: string[]; placeholder: string; hint: string }
+const FACTOR_HELP: Record<string, FactorHelp> = {
+  overlay: { name: "overlay", start: ["overlays/none"], suggest: [], placeholder: "Folder holding a skill or CLAUDE.md", hint: "Each level is a folder: a skill folder (with SKILL.md), or an overlay folder laid out like a project (.claude/skills, CLAUDE.md). overlays/none is the empty baseline." },
+  model: { name: "model", start: [], suggest: ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"], placeholder: "Model id, for example claude-opus-5-5", hint: "Each level is a model id. Add every model you want to compare." },
+  effort: { name: "effort", start: ["medium", "high"], suggest: ["low", "medium", "high", "xhigh", "max"], placeholder: "Effort level", hint: "Each level is an effort setting." },
+  runner: { name: "runner", start: ["claude-code"], suggest: ["claude-code", "codex", "mock"], placeholder: "Runner", hint: "Each level is an agent harness. To give each runner its own model, edit the levels in the TOML tab." },
+  system_prompt_append: { name: "append", start: [""], suggest: [], placeholder: "Text to append, or file:path/to/file.md", hint: "Each level is text appended to the system prompt. The empty level means nothing is appended." },
+  knob: { name: "flag", start: [], suggest: [], placeholder: "Value for the flag or variable", hint: "Each level is a value passed to the CLI flag or environment variable above." },
+};
+
+function uniqueName(factors: any[], base: string): string {
+  if (!factors.some((f) => f.name === base)) return base;
+  for (let n = 2; ; n++) if (!factors.some((f) => f.name === `${base}${n}`)) return `${base}${n}`;
+}
+
+/** The levels of one factor as removable chips, with an input and suggestions to add more. */
+function LevelChips({ kind, levels, help, suggestions, onChange }: { kind: string; levels: string[]; help: FactorHelp; suggestions: string[]; onChange: (levels: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  const add = (v: string) => {
+    const value = v.trim();
+    if ((value === "" && kind !== "system_prompt_append") || levels.includes(value)) return;
+    onChange([...levels, value]);
+    setDraft("");
+  };
+  const open = suggestions.filter((x) => !levels.includes(x));
+  return (
+    <div className="stack tight">
+      <div className="small muted">Levels <span className="faint">({help.hint})</span></div>
+      <div className="row wrap" style={{ gap: 6 }}>
+        {levels.length === 0 && <span className="chip warn">No levels yet: add at least two</span>}
+        {levels.map((l, i) => (
+          <span key={l || "(none)"} className={`chip ${i === 0 ? "" : "accent"}`} title={l || "nothing"} style={{ paddingRight: 2 }}>
+            {levelLabel(kind, l)}
+            {i === 0 ? <span className="faint" style={{ fontWeight: 400 }}>baseline</span>
+              : <button className="btn quiet sm" style={{ padding: "0 4px", fontWeight: 400 }} title="Compare the other levels against this one" onClick={() => onChange([l, ...levels.filter((x) => x !== l)])}>make baseline</button>}
+            <button className="btn quiet sm" style={{ padding: "0 5px" }} aria-label={`Remove ${l || "empty level"}`} onClick={() => onChange(levels.filter((x) => x !== l))}>×</button>
+          </span>
+        ))}
+      </div>
+      <div className="row wrap">
+        <input type="text" value={draft} placeholder={help.placeholder} aria-label={`Add a ${kind} level`} style={{ width: 340 }}
+          onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(draft); } }} />
+        <button className="btn sm" disabled={!draft.trim()} onClick={() => add(draft)}>Add level</button>
+      </div>
+      {open.length > 0 && (
+        <div className="row wrap small" style={{ gap: 6 }}>
+          <span className="muted">Add:</span>
+          {open.slice(0, 16).map((x) => <button key={x} className="btn sm" title={x} onClick={() => add(x)}>{kind === "overlay" ? x.replace(/^overlays\//, "") : x}</button>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Task files: what the agent is asked to do, with fixtures and graders. */
+function Tasks({ ctx }: { ctx: Ctx }) {
+  const list = useLoad<any[]>("tasks_list");
+  const [source, setSource] = useState<string | null>(null);
+  const [isNew, setIsNew] = useState(false);
+  const [toml, setToml] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const tasks = list.data ?? [];
+  const openTask = async (src: string) => {
+    setError(null); setSaved(false); setIsNew(false); setSource(src);
+    try { setToml((await call("task_get", { source: src })).toml); } catch (e: any) { setError(String(e.message ?? e)); }
+  };
+  const start = async () => {
+    setError(null); setSaved(false); setIsNew(true); setSource("tasks/my-task.toml");
+    setToml((await call("task_template")).toml);
+  };
+  const save = async () => {
+    if (!source) return;
+    try { await call("task_save", { source, toml }); setSaved(true); setIsNew(false); list.reload(); } catch (e: any) { setError(String(e.message ?? e)); setSaved(false); }
+  };
+  const remove = async () => {
+    if (!source || !confirm(`Delete ${source}?`)) return;
+    try { await call("task_delete", { source }); setSource(null); list.reload(); } catch (e: any) { setError(String(e.message ?? e)); }
+  };
+  return (
+    <>
+      <div className="row spread wrap top">
+        <div className="stack tight">
+          <h1>Tasks</h1>
+          <p className="muted" style={{ maxWidth: "76ch" }}>A task is a prompt, the files the agent starts with, and how the result is graded. Each task is one file under <code>tasks/</code>; experiments pick tasks by pattern, for example <code>tasks/**/*.toml</code>.</p>
+        </div>
+        <div className="row">
+          <button className="btn primary" onClick={start}>New task</button>
+          <button className="btn" onClick={() => ctx.go("/experiments/new")}>New experiment</button>
+        </div>
+      </div>
+      <ErrorNote error={list.error} />
+      <Panel title="Task files" flush>
+        {tasks.length === 0 ? <div className="empty">No tasks yet. Create the first one; three to six tasks that differ from each other give a far more trustworthy answer than one.</div> : (
+          <table className="grid">
+            <thead><tr><th>Task</th><th>File</th><th className="num">Expectations</th><th className="num">Graders</th></tr></thead>
+            <tbody>
+              {tasks.map((t, i) => t.error ? <tr key={i}><td colSpan={4}><span className="chip bad">invalid</span> {t.error}</td></tr> : (
+                <tr key={t.source} className="click" onClick={() => openTask(t.source)} style={source === t.source ? { background: "var(--accent-soft)" } : undefined}>
+                  <td><b>{t.id}</b> {(t.tags ?? []).map((x: string) => <span key={x} className="tag" style={{ marginLeft: 4 }}>{x}</span>)}<div className="muted small clip" style={{ maxWidth: 520 }}>{t.prompt}</div></td>
+                  <td className="mono muted">{t.source}</td>
+                  <td className="num">{t.expectations}</td>
+                  <td className="num">{t.deterministic}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+      {source !== null && (
+        <Panel title={isNew ? "New task" : source} sub="Fields are documented in docs/formats.md. Fixture folders live under fixtures/."
+          actions={<div className="row">{!isNew && <button className="btn quiet danger" onClick={remove}>Delete</button>}<button className="btn primary" onClick={save}>Save task</button></div>}>
+          <div className="stack">
+            {isNew && <label className="field">File<input type="text" value={source} onChange={(e) => setSource(e.target.value)} style={{ maxWidth: 420 }} /></label>}
+            <textarea rows={22} value={toml} spellCheck={false} aria-label="Task TOML" onChange={(e) => { setToml(e.target.value); setSaved(false); }} />
+            <ErrorNote error={error} />
+            {saved && <div className="note">Saved {source}.</div>}
+          </div>
+        </Panel>
       )}
     </>
   );

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Ctx } from "../App";
-import { Comparison, Report, fmtValue, info, remember, usd } from "../api";
+import { Comparison, Report, fmtDelta, fmtValue, info, remember, usd } from "../api";
 import { Empty, ErrorNote, Forest, MeanBar, Panel, Seg, VerdictMark, equivalenceBand } from "../components";
 import { useLoad } from "../hooks";
 
@@ -61,6 +61,48 @@ export default function Results({ ctx }: { ctx: Ctx }) {
                     <EffectBlock comparisons={comps("factor", f.name, m)} metric={m} />
                   </div>
                 ))}
+              </div>
+            </Panel>
+          );
+        })}
+
+        {withinPanels(r).map((g) => {
+          const m = info(r.primary_metric);
+          const rows = (r.conditional ?? []).filter((c) => c.metric === r.primary_metric && c.factor === g.factor && c.level === g.level && c.by_factor === g.by);
+          const anyDiffers = rows.some((c) => c.vs_first?.differs);
+          return (
+            <Panel key={`${g.factor}|${g.level}|${g.by}`} title={`Does "${g.level}" behave differently across ${g.by}?`}
+              sub={`The effect of "${g.level}" against "${rows[0]?.baseline}" on ${m.label.toLowerCase()}, measured separately within each ${g.by}.`}>
+              <div className="stack">
+                <Forest
+                  metric={m}
+                  labelHead={g.by}
+                  band={equivalenceBand(m, rows[0]?.base_mean ?? 0)}
+                  rows={rows.map((c) => ({
+                    key: c.by_level,
+                    label: c.by_level,
+                    sub: `${fmtValue(m, c.base_mean)} without → ${fmtValue(m, c.treat_mean)} with`,
+                    effect: c,
+                  }))}
+                />
+                <table className="grid">
+                  <thead><tr><th>{g.by}</th><th className="num">Effect here</th><th className="num">Difference from {rows[0]?.by_level}</th><th>Is the difference real?</th></tr></thead>
+                  <tbody>
+                    {rows.map((c) => (
+                      <tr key={c.by_level}>
+                        <td><b>{c.by_level}</b></td>
+                        <td className="num">{fmtDelta(m, c.effect)}</td>
+                        <td className="num">{c.vs_first ? <>{fmtDelta(m, c.vs_first.diff)} <span className="faint">[{fmtDelta(m, c.vs_first.ci_low)}, {fmtDelta(m, c.vs_first.ci_high)}]</span></> : <span className="faint">reference</span>}</td>
+                        <td>{c.vs_first ? (c.vs_first.differs ? <span className="chip accent">differs</span> : <span className="chip">not distinguishable yet</span>) : null}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="note">
+                  {anyDiffers
+                    ? `"${g.level}" does not act the same on every ${g.by}: at least one difference above has an interval that excludes zero.`
+                    : `No difference between ${g.by} levels is established yet. An effect that looks larger on one ${g.by} can still be noise; more tasks narrow these intervals fastest.`}
+                </div>
               </div>
             </Panel>
           );
@@ -239,4 +281,15 @@ function PairwisePanel({ p }: { p: any }) {
       </div>
     </Panel>
   );
+}
+
+/** One panel per (pattern level, other factor): overlays and prompt appends, split by each other factor. */
+function withinPanels(r: Report): { factor: string; level: string; by: string }[] {
+  const kind = (name: string) => r.factors.find((f) => f.name === name)?.kind ?? "";
+  const out: { factor: string; level: string; by: string }[] = [];
+  for (const c of r.conditional ?? []) {
+    if (c.metric !== r.primary_metric || !["overlay", "system_prompt_append"].includes(kind(c.factor))) continue;
+    if (!out.some((g) => g.factor === c.factor && g.level === c.level && g.by === c.by_factor)) out.push({ factor: c.factor, level: c.level, by: c.by_factor });
+  }
+  return out;
 }

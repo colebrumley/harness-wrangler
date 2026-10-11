@@ -66,7 +66,7 @@ The first level of each factor is its baseline. Variants are the cross product o
 
 | `kind` | Levels are | Notes |
 |---|---|---|
-| `overlay` | overlay directories | `overlays/none` or `""` is the empty baseline. Several overlay factors stack in order. |
+| `overlay` | overlay directories, or skill directories | An overlay directory is laid out like a project (`.claude/skills/...`, `CLAUDE.md`). A directory with `SKILL.md` at its root is installed as a skill directly, so a level can point at a skill where it lives in your repo (`plugins/x/skills/my-skill`). `overlays/none` or `""` is the empty baseline. Several overlay factors stack in order. |
 | `model` | model ids | |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max` | |
 | `runner` | runner ids | A level may be a table carrying that runner's model: `{ value = "codex", model = "gpt-5.5", effort = "low" }`. |

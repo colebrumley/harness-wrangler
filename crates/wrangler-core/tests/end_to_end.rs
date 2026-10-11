@@ -55,6 +55,19 @@ fn mock_experiment_end_to_end() {
     assert_eq!(plain_v.metrics["skill_invoked"].mean, 1.0);
     assert!(!rep.variants[0].metrics.contains_key("skill_invoked"));
 
+    // Per-level effects: the skill's effect within each effort level, and
+    // how the second level's effect differs from the first's.
+    let cond: Vec<_> = rep.conditional.iter().filter(|c| c.factor == "overlay" && c.level == "plain" && c.by_factor == "effort" && c.metric == "judge_score").collect();
+    assert_eq!(cond.iter().map(|c| c.by_level.as_str()).collect::<Vec<_>>(), vec!["medium", "high"]);
+    assert!(cond.iter().all(|c| c.effect.effect > 0.0 && c.effect.units == 3 && c.effect.n_a == 12), "{cond:?}");
+    assert_eq!(cond[0].effect.verdict, Verdict::Better);
+    assert!(cond[0].vs_first.is_none());
+    let d = cond[1].vs_first.as_ref().unwrap();
+    // The mock skill helps equally at both effort levels, so there is no interaction.
+    assert!(!d.differs && d.ci_low < 0.0 && d.ci_high > 0.0, "{d:?}");
+    assert!((d.diff - (cond[1].effect.effect - cond[0].effect.effect)).abs() < 1e-9);
+    assert!(report::render_text(&rep).contains("OVERLAY \"plain\" WITHIN EACH EFFORT"));
+
     let pw = rep.pairwise.as_ref().unwrap();
     assert_eq!(pw.rankings[0].source, "judge");
     // baseline mode: 5 other variants × 3 tasks × 3 reps

@@ -253,6 +253,40 @@ pub fn paired_effect(units: &[(Vec<f64>, Vec<f64>)], info: &MetricInfo, seed: u6
     })
 }
 
+/// How much one paired effect differs from another (B's effect minus A's),
+/// with a bootstrapped 95% CI. This is the interaction: "does the pattern
+/// behave differently here than there?"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contrast {
+    pub diff: f64,
+    pub ci_low: f64,
+    pub ci_high: f64,
+    /// The CI excludes zero: the two effects really differ.
+    pub differs: bool,
+}
+
+pub fn effect_difference(a: &[(Vec<f64>, Vec<f64>)], b: &[(Vec<f64>, Vec<f64>)], seed: u64) -> Option<Contrast> {
+    let clean = |u: &[(Vec<f64>, Vec<f64>)]| -> Vec<(Vec<f64>, Vec<f64>)> { u.iter().filter(|(x, y)| !x.is_empty() && !y.is_empty()).cloned().collect() };
+    let (a, b) = (clean(a), clean(b));
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let point = |u: &[(Vec<f64>, Vec<f64>)]| mean(&u.iter().map(|(x, y)| mean(y) - mean(x)).collect::<Vec<_>>());
+    let mut rng = Rng::new(seed);
+    let draw = |u: &[(Vec<f64>, Vec<f64>)], rng: &mut Rng| -> f64 {
+        let k = u.len();
+        (0..k).map(|_| {
+            let (x, y) = &u[if k > 1 { rng.below(k) } else { 0 }];
+            resample_mean(y, rng) - resample_mean(x, rng)
+        }).sum::<f64>() / k as f64
+    };
+    let mut boots: Vec<f64> = (0..BOOTSTRAP_ITERS).map(|_| draw(&b, &mut rng) - draw(&a, &mut rng)).collect();
+    boots.sort_by(|x, y| x.total_cmp(y));
+    let (lo, hi) = (percentile(&boots, 0.025), percentile(&boots, 0.975));
+    let thin = a.iter().chain(b.iter()).all(|(x, y)| x.len() < 2 && y.len() < 2) && a.len() == 1 && b.len() == 1;
+    Some(Contrast { diff: point(&b) - point(&a), ci_low: lo, ci_high: hi, differs: !thin && (lo > 0.0 || hi < 0.0) })
+}
+
 /// Is this cell's spread large enough to call the task flaky on this metric?
 pub fn is_flaky(xs: &[f64], scale: Scale) -> bool {
     if xs.len() < 3 {
@@ -407,6 +441,18 @@ mod tests {
         assert!(paired_effect(&[(vec![], vec![1.0])], &metric_info("pass"), 1).is_none());
         // One run a side is never conclusive.
         assert_eq!(paired_effect(&[(vec![1.0], vec![9.0])], &metric_info("judge_score"), 1).unwrap().verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn contrast_finds_an_interaction() {
+        // The pattern adds 2 points in group A and nothing in group B.
+        let a: Vec<_> = (0..5).map(|t| (noisy(5.0, 5, t), noisy(7.0, 5, 30 + t))).collect();
+        let b: Vec<_> = (0..5).map(|t| (noisy(7.0, 5, 60 + t), noisy(7.0, 5, 90 + t))).collect();
+        let c = effect_difference(&a, &b, 1).unwrap();
+        assert!((c.diff + 2.0).abs() < 0.6 && c.differs && c.ci_high < 0.0, "{c:?}");
+        let same = effect_difference(&a, &a, 1).unwrap();
+        assert!(!same.differs && same.diff.abs() < 1e-9);
+        assert!(effect_difference(&a, &[], 1).is_none());
     }
 
     #[test]

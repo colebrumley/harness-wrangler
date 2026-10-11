@@ -163,6 +163,11 @@ impl AgentRunner for CodexRunner {
     }
 }
 
+/// Codex wraps API errors as a JSON string; pull out the human message.
+fn error_text(raw: &str) -> String {
+    serde_json::from_str::<Value>(raw).ok().and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string())).unwrap_or_else(|| raw.to_string())
+}
+
 /// Normalize `codex exec --json` events into the common transcript shape.
 /// Shell commands become `shell` tool calls and file changes `apply_patch`.
 pub fn parse_jsonl(raw: &str) -> RunRecord {
@@ -199,7 +204,7 @@ pub fn parse_jsonl(raw: &str) -> RunRecord {
                     }
                     "web_search" => turn.tool_calls.push(ToolCall { id, name: "web_search".into(), input: json!({"query": it["query"]}) }),
                     "error" => {
-                        rec.events.push(RunEvent { kind: "error".into(), at_ms: 0, detail: it["message"].as_str().unwrap_or("").into() });
+                        rec.events.push(RunEvent { kind: "error".into(), at_ms: 0, detail: error_text(it["message"].as_str().unwrap_or("")) });
                         continue;
                     }
                     _ => continue,
@@ -225,8 +230,8 @@ pub fn parse_jsonl(raw: &str) -> RunRecord {
                     }
                 }
             }
-            "turn.failed" => rec.error = Some(ev["error"]["message"].as_str().unwrap_or("turn failed").to_string()),
-            "error" => rec.error = Some(ev["message"].as_str().unwrap_or("error").to_string()),
+            "turn.failed" => rec.error = Some(error_text(ev["error"]["message"].as_str().unwrap_or("turn failed"))),
+            "error" => rec.error = Some(error_text(ev["message"].as_str().unwrap_or("error"))),
             _ => {}
         }
     }
@@ -273,5 +278,43 @@ mod tests {
         assert_eq!(rec.metrics["cache_read_tokens"], 27008.0);
         assert_eq!(rec.transcript.skills_invoked(), vec!["pirate"]);
         assert!(rec.error.is_none());
+    }
+
+    // Real `codex exec --json` output (codex-cli 0.162), captured from live
+    // runs with paths shortened: a task with a plan, a failing command, a
+    // file edit, web searches and visible reasoning; and a rejected model.
+    #[test]
+    fn normalizes_real_output_with_every_item_type_seen() {
+        let rec = parse_jsonl(include_str!("../../tests/fixtures/codex-tools.jsonl"));
+        assert!(rec.error.is_none());
+        let names: std::collections::BTreeSet<&str> = rec.transcript.tool_calls().map(|c| c.name.as_str()).collect();
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), vec!["apply_patch", "shell", "web_search"]);
+        assert_eq!(rec.metrics["tool.shell"], 5.0);
+        assert_eq!(rec.metrics["tool.web_search"], 2.0);
+        assert_eq!(rec.metrics["tool.apply_patch"], 1.0);
+        assert_eq!(rec.metrics["tool_calls"], 8.0);
+        // Every tool call that has output is followed by its result, with failures marked.
+        let results: Vec<&ToolResult> = rec.transcript.turns.iter().flat_map(|t| t.tool_results.iter()).collect();
+        assert_eq!(results.len(), 6, "5 commands and 1 file change");
+        assert!(results.iter().any(|r| r.is_error && r.content.contains("No such file")), "the failing `ls` must be an error result");
+        assert!(rec.transcript.tool_calls().any(|c| c.name == "web_search" && c.input["query"].as_str().unwrap_or("").contains("Rust")));
+        assert!(rec.transcript.turns.iter().any(|t| !t.thinking.is_empty()), "reasoning is kept as thinking, not as text");
+        assert!(rec.transcript.turns.iter().filter(|t| !t.thinking.is_empty()).all(|t| t.text.is_empty()));
+        // The final message is the last agent message, and usage is split the same way as Claude's.
+        assert!(!rec.final_text.is_empty() && rec.final_text == rec.transcript.final_text());
+        for m in ["input_tokens", "cache_read_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cache_hit", "turns"] {
+            assert!(rec.metrics.contains_key(m), "missing {m}");
+        }
+        assert!(rec.metrics["cache_hit"] >= 0.0 && rec.metrics["cache_hit"] <= 1.0);
+        assert!(!rec.metrics.contains_key("cost_usd"), "Codex reports no dollar cost");
+    }
+
+    #[test]
+    fn real_api_error_becomes_a_readable_run_error() {
+        let rec = parse_jsonl(include_str!("../../tests/fixtures/codex-error.jsonl"));
+        let err = rec.error.expect("a rejected model is an error");
+        assert!(err.starts_with("The 'not-a-real-model-xyz' model is not supported"), "{err}");
+        assert!(rec.transcript.tool_calls().next().is_none() && rec.final_text.is_empty());
+        assert!(rec.rate_limited.is_none());
     }
 }

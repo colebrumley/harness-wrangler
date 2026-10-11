@@ -1,8 +1,8 @@
 //! Tests against the real runner CLIs.
 //!
-//! `user_level_hooks_are_suppressed` needs only the `claude` binary: hooks
-//! fire before any API call, so it runs logged out under a temporary HOME
-//! and spends nothing. The rest make real model calls and run only with
+//! `overlay_isolation_hides_user_level_config` needs only the `claude`
+//! binary and runs on every `cargo test`: it works logged out under a
+//! temporary HOME and spends nothing. The rest make real model calls and run only with
 //! `WRANGLER_LIVE=1` (Claude Code, Haiku) or `WRANGLER_LIVE_CODEX=1`:
 //!
 //!   WRANGLER_LIVE=1 cargo test -p wrangler-core --test live_runners -- --nocapture
@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use wrangler_core::model::*;
-use wrangler_core::runner::{self, exec, ExecSpec, Limits};
+use wrangler_core::runner::{self, exec, AgentRunner, ExecSpec, Limits};
 use wrangler_core::workspace::Workspace;
 use wrangler_core::Project;
 
@@ -59,8 +59,13 @@ fn task(prompt: &str) -> Task {
     Task::parse(&format!("id = 'live'\nprompt = '''{prompt}'''\n")).unwrap()
 }
 
+/// The overlay isolation claim from the design's spike, checked on every
+/// test run. Claude Code reports what it loaded (the `init` event) and fires
+/// hooks before any API call, so this runs logged out under a temporary HOME
+/// and spends nothing. The control run drops the isolation flags to prove
+/// each planted user-level item would otherwise be picked up.
 #[test]
-fn user_level_hooks_are_suppressed() {
+fn overlay_isolation_hides_user_level_config() {
     if !have("claude") {
         eprintln!("skipped: claude is not installed");
         return;
@@ -69,6 +74,7 @@ fn user_level_hooks_are_suppressed() {
     let root = tmp.path().canonicalize().unwrap();
     let home = root.join("home");
     let marker = |tag: &str| root.join(format!("hook-fired-{tag}"));
+    // User-level config: hooks, a skill, and an MCP server.
     common::write(
         &home,
         ".claude/settings.json",
@@ -78,17 +84,21 @@ fn user_level_hooks_are_suppressed() {
         }})
         .to_string(),
     );
-    let project = Project::init(&root.join("proj")).unwrap();
+    common::write(&home, ".claude/skills/user-only-skill/SKILL.md", "---\nname: user-only-skill\ndescription: A user-level skill.\n---\nbody\n");
+    common::write(&home, ".claude.json", r#"{"mcpServers":{"user-mcp":{"command":"/bin/sleep","args":["600"]}}}"#);
+    let project = overlay_project(&root.join("proj"));
     let t = task("say ok");
-    let v = variant("claude-code", None, Some("haiku"));
+    let v = variant("claude-code", Some("overlays/marked"), Some("haiku"));
+    let mut seen: Vec<(Vec<String>, Vec<String>)> = vec![];
     for (tag, isolated) in [("control", false), ("isolated", true)] {
-        let ws = Workspace::create(&project, &t, &root.join(format!("run-{tag}")), "hooks").unwrap();
+        let ws = Workspace::create(&project, &t, &root.join(format!("run-{tag}")), "iso").unwrap();
         let runner = runner::claude::ClaudeCodeRunner::default();
+        runner.materialize(&ws, &v).unwrap();
         let mut args = runner.build_args(&ws, &t, &v, &limits(Isolation::Workspace, NetworkPolicy::Full)).unwrap();
         if !isolated {
-            // The control drops the isolation flag to prove the hook would fire.
             let i = args.iter().position(|a| a == "--setting-sources").unwrap();
             args.drain(i..i + 2);
+            args.retain(|a| a != "--strict-mcp-config");
         }
         let out = exec(&ExecSpec {
             program: "claude".into(),
@@ -103,10 +113,23 @@ fn user_level_hooks_are_suppressed() {
         })
         .unwrap();
         assert!(!out.timed_out, "claude hung: {}", out.stderr);
+        let init: serde_json::Value = out.stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find(|e| e["subtype"] == "init").unwrap_or_else(|| panic!("no init event in {tag} run: {}", out.stdout));
+        let names = |v: &serde_json::Value, key: Option<&str>| -> Vec<String> {
+            v.as_array().into_iter().flatten().filter_map(|x| match key { Some(k) => x[k].as_str(), None => x.as_str() }).map(|s| s.to_string()).collect()
+        };
+        seen.push((names(&init["skills"], None), names(&init["mcp_servers"], Some("name"))));
         ws.remove();
     }
-    assert!(marker("control").exists(), "control run did not fire the user-level hook, so this test proves nothing");
+    let (control, isolated) = (&seen[0], &seen[1]);
+    // The control proves the test can see each leak.
+    assert!(marker("control").exists(), "control run did not fire the user-level hook");
+    assert!(control.0.iter().any(|s| s == "user-only-skill"), "control run did not load the user-level skill: {:?}", control.0);
+    assert!(control.1.iter().any(|s| s == "user-mcp"), "control run did not load the user-level MCP server: {:?}", control.1);
+    // Isolated: the overlay is in, everything user-level is out.
+    assert!(isolated.0.iter().any(|s| s == "pirate-notes"), "overlay skill was not discovered: {:?}", isolated.0);
     assert!(!marker("isolated").exists(), "--setting-sources project let a user-level hook fire");
+    assert!(!isolated.0.iter().any(|s| s == "user-only-skill"), "user-level skill leaked: {:?}", isolated.0);
+    assert!(isolated.1.is_empty(), "MCP servers leaked: {:?}", isolated.1);
 }
 
 #[test]

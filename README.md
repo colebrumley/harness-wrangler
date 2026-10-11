@@ -107,6 +107,24 @@ wrangler suite diff writing-skills --model claude-opus-5-5
 
 The diff lists patterns that regressed first, then ones the new model made redundant, then ones still earning their keep.
 
+## Does a skill behave differently across models?
+
+Cross the skill with a model factor in one experiment:
+
+```toml
+[[factors]]
+name = "skill"
+kind = "overlay"
+levels = ["overlays/none", "plugins/reader-first-writing/skills/reader-first-writing"]
+
+[[factors]]
+name = "model"
+kind = "model"
+levels = ["claude-opus-4-8", "claude-opus-5", "claude-opus-5-5"]
+```
+
+The report then shows the skill's effect within each model, and for each later model how far its effect is from the first model's, with a 95% interval. A difference whose interval excludes zero is marked "differs"; otherwise the models are "not distinguishable" on this data.
+
 ## How results are computed
 
 - Each cell (task × variant) runs N times; the default is 5.
