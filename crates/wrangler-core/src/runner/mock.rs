@@ -42,7 +42,11 @@ impl AgentRunner for MockRunner {
     }
 
     fn run(&self, ws: &Workspace, task: &Task, variant: &Variant, limits: &Limits) -> Result<RunRecord> {
-        let seed = hash_u64(&format!("{}|{}|{}", task.id, variant.key, ws.run_dir.display()));
+        // Seeded by launch and run number (the last two parts of the run
+        // directory), not the full path, so mock results are the same on
+        // every machine and in every temp directory.
+        let tail: Vec<String> = ws.run_dir.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+        let seed = hash_u64(&format!("{}|{}|{}", task.id, variant.key, tail.join("/")));
         let mut rng = Rng::new(seed);
         let mut rec = RunRecord::default();
         let mut quality = 0.5 + ((hash_u64(&task.id) % 200) as f64 / 1000.0 - 0.1);
