@@ -117,7 +117,7 @@ impl AgentRunner for CodexRunner {
         let args = self.build_args(ws, task, variant, limits);
         let mut env: Vec<(String, String)> = vec![("CODEX_HOME".into(), home.to_string_lossy().to_string())];
         env.extend(variant.knobs().iter().filter_map(|k| k.env.clone().map(|e| (e, k.value.clone()))));
-        let spec = ExecSpec {
+        let mut spec = ExecSpec {
             program: self.binary(),
             args,
             cwd: ws.dir.clone(),
@@ -130,10 +130,14 @@ impl AgentRunner for CodexRunner {
         };
         let mut command = vec![spec.program.clone()];
         command.extend(spec.args.iter().cloned());
+        // In a container the per-run home must exist, and its auth symlink must resolve.
+        let docker = crate::isolation::DockerRun::wrap(ws, limits, &mut spec, &[(home.clone(), false), (auth.clone(), true)])?;
         let out = exec(&spec)?;
+        let docker_events = docker.map(|d| d.finish()).unwrap_or_default();
         // The per-run home holds caches and state databases; only auth mattered.
         let _ = std::fs::remove_dir_all(&home);
         let mut rec = parse_jsonl(&out.stdout);
+        rec.events.extend(docker_events);
         rec.command = command;
         rec.model = variant.model.clone().unwrap_or_default();
         rec.raw_output = out.stdout;

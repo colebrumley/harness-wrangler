@@ -379,13 +379,21 @@ impl Store {
     }
 
     pub fn set_launch_status(&self, id: i64, status: &str, phase: &str) -> Result<()> {
-        let finished = matches!(status, "done" | "failed" | "cancelled").then(now);
+        let finished = matches!(status, "done" | "failed" | "cancelled" | "budget").then(now);
         // The owning process is recorded so a crash can be told from a live run.
         let pid = (status == "running").then(|| std::process::id() as i64);
         self.c().execute(
             "UPDATE launches SET status = ?2, phase = ?3, finished_at = COALESCE(?4, finished_at), pid = ?5 WHERE id = ?1",
             params![id, status, phase, finished, pid],
         )?;
+        Ok(())
+    }
+
+    /// Change a launch's spending cap (the rest of its definition is frozen).
+    pub fn set_launch_budget(&self, id: i64, budget_usd: Option<f64>) -> Result<()> {
+        let mut def = self.launch(id)?.def;
+        def.budget_usd = budget_usd;
+        self.c().execute("UPDATE launches SET def_json = ?2 WHERE id = ?1", params![id, serde_json::to_string(&def)?])?;
         Ok(())
     }
 

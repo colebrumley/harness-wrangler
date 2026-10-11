@@ -132,6 +132,70 @@ impl Sandbox {
     }
 }
 
+// ----------------------------------------------------------------- docker
+
+/// Isolation ladder, level 3: run the runner CLI inside a container. Only
+/// the workspace (and any extra paths the runner needs) is mounted, at the
+/// same path as on the host so transcripts and diffs line up. Optional: no
+/// other isolation level touches Docker.
+pub struct DockerRun {
+    name: String,
+}
+
+pub const DOCKER_DEFAULT_ENV: &[&str] = &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"];
+
+/// The `docker run` argument list that wraps `program args`.
+pub fn docker_args(name: &str, image: &str, workspace: &Path, mounts: &[(PathBuf, bool)], env: &[(String, String)], pass_env: &[String], extra: &[String], program: &str, args: &[String]) -> Vec<String> {
+    let ws = canon(workspace).to_string_lossy().to_string();
+    let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "-i".into(), "--name".into(), name.into(), "-v".into(), format!("{ws}:{ws}"), "-w".into(), ws];
+    for (path, read_only) in mounts {
+        let p = canon(path).to_string_lossy().to_string();
+        a.extend(["-v".into(), format!("{p}:{p}{}", if *read_only { ":ro" } else { "" })]);
+    }
+    for (k, v) in env {
+        a.extend(["-e".into(), format!("{k}={v}")]);
+    }
+    // By name only: the value comes from the docker client's environment
+    // and never appears in the recorded command line.
+    for k in pass_env {
+        if std::env::var_os(k).is_some() {
+            a.extend(["-e".into(), k.clone()]);
+        }
+    }
+    a.extend(extra.iter().cloned());
+    a.push(image.into());
+    a.push(program.into());
+    a.extend(args.iter().cloned());
+    a
+}
+
+impl DockerRun {
+    /// Rewrite the command to run in a container, or `None` below the docker level.
+    /// `mounts` are extra host paths (path, read_only) the runner needs inside.
+    pub fn wrap(ws: &Workspace, limits: &Limits, spec: &mut ExecSpec, mounts: &[(PathBuf, bool)]) -> Result<Option<DockerRun>> {
+        if limits.isolation != Isolation::Docker {
+            return Ok(None);
+        }
+        let image = limits.cfg.docker_image.clone().context("isolation = \"docker\" needs [runner] docker_image")?;
+        let name = format!("wrangler-{}", uuid::Uuid::new_v4().simple());
+        let pass: Vec<String> = if limits.cfg.docker_env.is_empty() { DOCKER_DEFAULT_ENV.iter().map(|s| s.to_string()).collect() } else { limits.cfg.docker_env.clone() };
+        let mut all_mounts = mounts.to_vec();
+        for p in &limits.cfg.plugin_dirs {
+            all_mounts.push((ws.project.abs(p), true));
+        }
+        spec.args = docker_args(&name, &image, &ws.dir, &all_mounts, &spec.env, &pass, &limits.cfg.docker_args, &spec.program, &spec.args);
+        spec.program = "docker".into();
+        spec.env.clear();
+        Ok(Some(DockerRun { name }))
+    }
+
+    /// Make sure the container is gone (a killed client can leave it running).
+    pub fn finish(self) -> Vec<RunEvent> {
+        let _ = std::process::Command::new("docker").args(["rm", "-f", &self.name]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        vec![RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("ran in docker container {}", self.name) }]
+    }
+}
+
 // ------------------------------------------------------------------ proxy
 
 /// Minimal HTTP CONNECT proxy that only tunnels to allowlisted hosts.
@@ -270,6 +334,17 @@ mod tests {
         let (allowed, blocked) = p.stop();
         assert_eq!(allowed, 0);
         assert_eq!(blocked, vec!["example.com"]);
+    }
+
+    #[test]
+    fn docker_command_shape() {
+        std::env::set_var("WRANGLER_TEST_SECRET", "s3cret");
+        let a = docker_args("n1", "img:1", Path::new("/tmp"), &[(PathBuf::from("/usr"), true)], &[("K".into(), "v".into())], &["WRANGLER_TEST_SECRET".into(), "WRANGLER_UNSET_VAR".into()], &["--network".into(), "none".into()], "claude", &["-p".into(), "hi".into()]);
+        let joined = a.join(" ");
+        assert!(joined.starts_with("run --rm -i --name n1 -v "), "{joined}");
+        assert!(joined.contains(":ro") && joined.contains("-e K=v") && joined.contains("-e WRANGLER_TEST_SECRET"));
+        assert!(!joined.contains("s3cret") && !joined.contains("WRANGLER_UNSET_VAR"), "secrets pass by name only: {joined}");
+        assert!(joined.ends_with("--network none img:1 claude -p hi"), "{joined}");
     }
 
     #[test]

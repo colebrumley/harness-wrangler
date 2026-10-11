@@ -377,6 +377,9 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         }
     }
     let counts = count(&all);
+    if launch.status == "budget" {
+        warnings.push(format!("stopped at the ${:.2} budget with {} run(s) not started; resume with a higher cap (`wrangler resume {} --budget <usd>`) to continue", exp.budget_usd.unwrap_or(0.0), counts.pending, launch_id));
+    }
     if counts.failed > 0 {
         warnings.push(format!("{} run(s) failed and are excluded from quality metrics", counts.failed));
     }

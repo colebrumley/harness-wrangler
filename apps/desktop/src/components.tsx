@@ -51,9 +51,10 @@ export function Seg<T extends string>({ options, value, onChange }: { options: [
   );
 }
 
-const STATUS_CHIP: Record<string, string> = { done: "good", running: "accent", failed: "bad", timeout: "warn", cancelled: "", interrupted: "warn", pending: "" };
+const STATUS_CHIP: Record<string, string> = { done: "good", running: "accent", failed: "bad", timeout: "warn", cancelled: "", interrupted: "warn", budget: "warn", pending: "" };
 export function StatusChip({ status, phase }: { status: string; phase?: string }) {
-  return <span className={`chip ${STATUS_CHIP[status] ?? ""}`}>{status}{phase ? `: ${phase}` : ""}</span>;
+  const word = status === "budget" ? "budget reached" : status;
+  return <span className={`chip ${STATUS_CHIP[status] ?? ""}`}>{word}{phase ? `: ${phase}` : ""}</span>;
 }
 
 // Verdicts never rely on colour alone: each has its own glyph and word.

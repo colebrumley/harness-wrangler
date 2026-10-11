@@ -46,6 +46,18 @@ Seatbelt filters by address, not hostname. So `network = "anthropic"` denies all
 
 `network = "full"` leaves the network alone.
 
+## Docker
+
+`isolation = "docker"` is optional; nothing else depends on Docker. The runner CLI runs inside `docker run --rm` from `[runner] docker_image`, with only the workspace mounted, at the same path as on the host. Fixture copy, overlay, baseline commit, diff and graders all stay on the host. The container is removed after the run even if the client was killed.
+
+A subscription login lives in the macOS keychain and does not exist in a container, so the runner must authenticate from an environment variable. `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` and `OPENAI_API_KEY` are passed by name when set; `docker_env` replaces that list. Values are never written to the recorded command line. `network = "anthropic"` is not applied here; use `docker_args = ["--network", ...]`.
+
+Tested with a stand-in runner in `alpine`: it ran on Linux in the mounted workspace, could not see host paths outside it, and left no container behind. It has not been run with a real Claude Code image, because this machine has no API key.
+
+## Budget
+
+`budget_usd` caps one launch's agent plus judge cost. The cap is checked before each run starts, so the overshoot is at most the runs already in flight. A launch that reaches it stops with status `budget`: finished runs are kept, the judge phase does not run, and `wrangler resume <launch> --budget <usd>` continues. Runners that report no dollar cost (Codex) do not count toward it.
+
 ## Codex
 
 Each run gets its own `CODEX_HOME` holding only a symlink to your `auth.json`, so your `~/.codex/AGENTS.md`, config and skills stay out. It is deleted after the run.

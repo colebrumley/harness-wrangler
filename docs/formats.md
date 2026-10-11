@@ -22,9 +22,10 @@ name = "rfw-effort"
 description = "Does rfw help, and does effort matter?"
 runs_per_cell = 5            # default 5
 timeout_secs = 900           # per run, default 900
-isolation = "seatbelt"       # "workspace" (default) or "seatbelt"
+isolation = "seatbelt"       # "workspace" (default), "seatbelt", or "docker"
 network = "anthropic"        # seatbelt only: "full" (default) or "anthropic"
 primary_metric = "judge_score"   # optional; default judge_score, then pass
+budget_usd = 25.0            # optional cap for one launch, agent + judge cost
 keep_workspaces = false      # keep each run's temp workspace on disk
 
 [runner]
@@ -35,6 +36,9 @@ effort = "medium"            # default when no effort factor
 max_turns = 40               # optional
 plugin_dirs = ["plugins/x"]  # passed with --plugin-dir, never installed
 max_retries = 4              # rate-limit retries per run
+docker_image = "my/claude:1" # isolation = "docker": image with the runner CLI
+docker_env = ["ANTHROPIC_API_KEY"]   # host env vars passed in by name
+docker_args = ["--network", "none"]  # extra `docker run` arguments
 
 [[factors]]
 name = "overlay"

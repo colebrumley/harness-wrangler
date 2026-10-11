@@ -302,6 +302,7 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
         isolation: Isolation::Workspace,
         network: NetworkPolicy::Full,
         primary_metric: req.primary_metric.clone(),
+        budget_usd: None,
         keep_workspaces: false,
         runner: RunnerCfg { kind: req.runner.clone().unwrap_or_else(|| "claude-code".into()), model: req.model.clone(), effort: req.effort.clone(), ..Default::default() },
         factors: vec![Factor { name: "overlay".into(), kind: FactorKind::Overlay, levels, flag: None, env: None }],

@@ -45,6 +45,11 @@ pub struct Experiment {
     /// Metric used for verdicts, ablation attribution and advice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_metric: Option<String>,
+    /// Optional spending cap for one launch, agent plus judge cost. When it
+    /// is reached no further runs start; finished runs are kept and the
+    /// launch can be resumed after raising the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
     /// Keep run workspaces on disk after the run instead of deleting them.
     #[serde(default, skip_serializing_if = "is_false")]
     pub keep_workspaces: bool,
@@ -102,6 +107,16 @@ pub struct RunnerCfg {
     /// Codex only: sandbox mode passed to `codex exec --sandbox`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_sandbox: Option<String>,
+    /// `isolation = "docker"`: image that has the runner CLI installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_image: Option<String>,
+    /// Host environment variables passed into the container by name.
+    /// Default: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docker_env: Vec<String>,
+    /// Extra arguments for `docker run` (mounts, `--network`, resource limits).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docker_args: Vec<String>,
 }
 
 impl Default for RunnerCfg {
@@ -115,6 +130,9 @@ impl Default for RunnerCfg {
             plugin_dirs: vec![],
             max_retries: default_retries(),
             codex_sandbox: None,
+            docker_image: None,
+            docker_env: vec![],
+            docker_args: vec![],
         }
     }
 }
@@ -520,6 +538,9 @@ impl Experiment {
         }
         if self.runs_per_cell == 0 {
             bail!("runs_per_cell must be at least 1");
+        }
+        if self.budget_usd.map(|b| !(b > 0.0)).unwrap_or(false) {
+            bail!("budget_usd must be greater than zero");
         }
         let mut seen = std::collections::BTreeSet::new();
         for f in &self.factors {

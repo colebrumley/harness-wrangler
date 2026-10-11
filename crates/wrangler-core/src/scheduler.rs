@@ -25,6 +25,8 @@ pub struct RunOptions {
     pub skip_judge: bool,
     /// Also rerun runs that failed or timed out (resume).
     pub retry_failed: bool,
+    /// Replace the launch's spending cap before running (resume after a budget stop).
+    pub budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +68,9 @@ fn sleep_cancellable(d: Duration, cancel: &AtomicBool) {
 
 /// Run all pending runs of a launch, then the judge phase.
 pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptions, cancel: Arc<AtomicBool>, sink: EventSink) -> Result<()> {
+    if let Some(b) = opts.budget_usd {
+        store.set_launch_budget(launch_id, Some(b))?;
+    }
     let launch = store.launch(launch_id)?;
     store.reset_incomplete(launch_id, opts.retry_failed)?;
     let all = store.runs(launch_id)?;
@@ -83,13 +88,28 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
 
     let done = AtomicUsize::new(total - pending.len());
     let queue = Mutex::new(pending);
+    // Budget: what this launch has already spent (agent and judge), plus
+    // what finishes during this execution. Checked before each run starts,
+    // so the overshoot is at most the runs already in flight.
+    let budget = launch.def.budget_usd;
+    let spent = Mutex::new(launch_cost(store, launch_id)?);
+    let over_budget = AtomicBool::new(false);
     let outcome: Result<()> = std::thread::scope(|scope| {
         let mut handles = vec![];
         for _ in 0..concurrency {
             handles.push(scope.spawn(|| -> Result<()> {
                 loop {
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Relaxed) || over_budget.load(Ordering::Relaxed) {
                         return Ok(());
+                    }
+                    if let Some(cap) = budget {
+                        let now = *spent.lock().unwrap();
+                        if now >= cap {
+                            if !over_budget.swap(true, Ordering::Relaxed) {
+                                sink(Event::Warning { message: format!("budget of ${cap:.2} reached (${now:.4} spent); no further runs will start") });
+                            }
+                            return Ok(());
+                        }
                     }
                     let Some(run) = queue.lock().unwrap().pop_front() else { return Ok(()) };
                     let task = launch.tasks.iter().find(|t| t.id == run.task_id).context("run references unknown task")?;
@@ -105,6 +125,7 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
                             ("failed".to_string(), None, msg)
                         }
                     };
+                    *spent.lock().unwrap() += cost.unwrap_or(0.0);
                     sink(Event::RunFinished {
                         run_id: run.id,
                         task: task.id.clone(),
@@ -143,6 +164,13 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
         sink(Event::Finished { launch_id, status: "cancelled".into() });
         return Ok(());
     }
+    if over_budget.load(Ordering::Relaxed) {
+        // Stopped, not failed: finished runs are kept, and a resume with a
+        // higher cap continues from here.
+        store.set_launch_status(launch_id, "budget", "")?;
+        sink(Event::Finished { launch_id, status: "budget".into() });
+        return Ok(());
+    }
     if !opts.skip_judge {
         if let Err(e) = judge_launch(project, store, launch_id, concurrency, &cancel, sink) {
             sink(Event::Warning { message: format!("judge phase failed: {e:#}") });
@@ -152,6 +180,13 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
     store.set_launch_status(launch_id, status, "")?;
     sink(Event::Finished { launch_id, status: status.into() });
     Ok(())
+}
+
+/// Agent plus judge cost recorded for a launch so far.
+pub fn launch_cost(store: &Store, launch_id: i64) -> Result<f64> {
+    let runs: f64 = store.metrics_for_launch(launch_id)?.values().map(|m| m.get("cost_usd").copied().unwrap_or(0.0) + m.get("judge_cost_usd").copied().unwrap_or(0.0)).sum();
+    let pairs: f64 = store.judgments(launch_id, Some("judge"))?.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum();
+    Ok(runs + pairs)
 }
 
 fn overlay_skill_names(ws: &Workspace) -> Vec<String> {
@@ -407,6 +442,12 @@ pub fn judge_launch(project: &Project, store: &Store, launch_id: i64, concurrenc
         Some(p) => Some(std::fs::read_to_string(project.abs(p)).with_context(|| format!("reading rubric {p}"))?),
         None => None,
     };
+    if let Some(cap) = launch.def.budget_usd {
+        let spent = launch_cost(store, launch_id)?;
+        if spent >= cap {
+            bail!("budget of ${cap:.2} reached (${spent:.4} spent); the judge phase did not run");
+        }
+    }
     let backend = judge::backend_for(&cfg);
     let runs = store.runs(launch_id)?;
     let task_of = |id: &str| launch.tasks.iter().find(|t| t.id == id);

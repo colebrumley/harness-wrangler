@@ -66,8 +66,8 @@ Run commands inside a project folder, or pass `-C <dir>`. Every command takes `-
 | `wrangler doctor` | Check the runner CLIs are installed. |
 | `wrangler list experiments\|tasks\|overlays\|launches\|suites` | List things. |
 | `wrangler validate <experiment>` | Check a definition and show its cells. Runs nothing. |
-| `wrangler run <experiment> [--reps N] [--concurrency N] [--no-judge]` | Run every cell, grade, judge, print the report. Ctrl-C stops cleanly. |
-| `wrangler resume <launch> [--retry-failed]` | Finish an interrupted launch. |
+| `wrangler run <experiment> [--reps N] [--concurrency N] [--no-judge] [--budget USD]` | Run every cell, grade, judge, print the report. Ctrl-C stops cleanly. |
+| `wrangler resume <launch> [--retry-failed] [--budget USD]` | Finish an interrupted launch. |
 | `wrangler judge <launch>` | Run or finish the LLM judge phase. |
 | `wrangler status <launch>` | Per-cell progress and cost. |
 | `wrangler report <launch\|experiment> [--metric m]` | Variants, factor effects with 95% CIs, per-task table, pairwise, ablation. |
@@ -127,6 +127,6 @@ WRANGLER_LIVE=1 WRANGLER_LIVE_CODEX=1 cargo test -p wrangler-core --test live_ru
 ## Known limits
 
 - The Codex runner runs under Codex's own `workspace-write` sandbox by default and reports tokens but not dollar cost. Set `[runner] codex_sandbox` to change the sandbox mode.
-- `isolation = "docker"` is not implemented.
-- No budget enforcement. Per-run timeouts and `max_turns` are enforced.
+- `isolation = "docker"` needs an image with the runner CLI and an API key or token in the environment; a subscription login cannot enter a container. It is tested with a stand-in runner, not a real Claude Code image.
+- `budget_usd` caps a launch's cost; Codex runs report no cost and do not count toward it.
 - Runs use `bypassPermissions`. Use `isolation = "seatbelt"` for fixtures you do not trust.

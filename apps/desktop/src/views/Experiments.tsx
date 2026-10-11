@@ -122,6 +122,7 @@ function Detail({ name, ctx, onChanged }: { name: string; ctx: Ctx; onChanged: (
               <div><span>Model</span><b>{def.runner.model ?? (def.factors?.some((f: any) => f.kind === "model") ? "from factor" : "runner default")}</b></div>
               <div><span>Isolation</span><b>{def.isolation}{def.isolation === "seatbelt" ? `, network ${def.network}` : ""}</b></div>
               <div><span>Timeout per run</span><b>{def.timeout_secs}s</b></div>
+              <div><span>Budget per launch</span><b>{def.budget_usd ? `$${def.budget_usd}` : "no cap"}</b></div>
               <div><span>Judge</span><b>{def.graders?.default?.judge ? `${def.graders.default.judge.model}${def.graders.default.judge.pairwise ? " + pairwise" : ""}` : "none"}</b></div>
               <div><span>Human review</span><b>{def.graders?.default?.human?.enabled ? "on" : "off"}</b></div>
             </div>
@@ -172,6 +173,7 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
   const live = launch.status === "running" || launch.status === "pending";
   const q = useLoad<any>("launch_status", { launch_id: launch.id }, [launch.status], live ? 1000 : 0);
   const [error, setError] = useState<string | null>(null);
+  const [cap, setCap] = useState("");
   const s = q.data;
   if (!s) return <ErrorNote error={q.error} />;
   const c = s.counts;
@@ -181,6 +183,7 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
     catch (e: any) { setError(String(e.message ?? e)); }
   };
   const unfinished = c.pending + c.cancelled + c.failed + c.timeout > 0;
+  const overBudget = launch.status === "budget";
   const seg = (n: number, color: string) => <i style={{ width: `${(n / Math.max(1, c.total)) * 100}%`, background: color }} />;
   const events: any[] = (s.events ?? []).filter((e: any) => e.event === "rate_limited" || e.event === "warning").slice(-4);
   return (
@@ -190,7 +193,8 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
       actions={
         <div className="row">
           {s.active && <button className="btn danger" onClick={() => act("launch_cancel")}>Cancel</button>}
-          {!s.active && launch.status !== "running" && unfinished && <button className="btn" onClick={() => act("launch_resume", { retry_failed: true })}>Resume unfinished runs</button>}
+          {overBudget && <label className="row small muted" style={{ gap: 6 }}>New cap $<input type="number" min={0} step="0.5" value={cap} onChange={(e) => setCap(e.target.value)} style={{ width: 80 }} aria-label="New budget in dollars" /></label>}
+          {!s.active && launch.status !== "running" && unfinished && <button className="btn" disabled={overBudget && !(Number(cap) > s.cost_usd + s.judge_cost_usd)} onClick={() => act("launch_resume", { retry_failed: true, budget_usd: overBudget ? Number(cap) : undefined })}>{overBudget ? "Raise cap and resume" : "Resume unfinished runs"}</button>}
           {!s.active && launch.status !== "running" && s.has_judge && c.done > 0 && s.judged < c.done && <button className="btn" onClick={() => act("judge_run")}>Run the judge</button>}
           {s.human_review && c.done > 0 && <a className="btn" href={`#/review/${launch.id}`} style={{ textDecoration: "none" }}>Review</a>}
           {!s.active && launch.status !== "running" && <button className="btn quiet danger" onClick={() => { if (confirm(`Delete launch #${launch.id} and its run artifacts?`)) act("launch_delete"); }}>Delete</button>}
@@ -202,7 +206,8 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
           {seg(c.done, "var(--good)")}{seg(c.running, "var(--series)")}{seg(c.timeout, "var(--warn)")}{seg(c.failed, "var(--bad)")}
         </div>
         {s.phase && s.status === "running" && s.phase !== "runs" && <p className="muted">Now: {s.phase}{s.has_judge ? ` (${s.judged} runs scored, ${s.judgments} pairs compared)` : ""}</p>}
-        {launch.status === "interrupted" && <div className="note warn">The process running this launch stopped. Finished runs are kept; resume to do the rest.</div>}
+        {overBudget && <div className="note warn">Stopped at the ${s.budget_usd} budget with {c.pending} runs not started. Finished runs are kept. Set a higher cap to continue.</div>}
+                {launch.status === "interrupted" && <div className="note warn">The process running this launch stopped. Finished runs are kept; resume to do the rest.</div>}
         {events.map((e, i) => <div key={i} className="note warn">{e.event === "rate_limited" ? `Rate limited on run ${e.run_id}: waiting ${e.wait_s}s before retry ${e.attempt}. ${e.detail}` : e.message}</div>)}
         <ErrorNote error={error ?? q.error} />
         <div className="scrollx">
@@ -314,8 +319,13 @@ function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved
                   <select value={def.isolation} onChange={(e) => patch((d) => { d.isolation = e.target.value; })}>
                     <option value="workspace">Workspace copy</option>
                     <option value="seatbelt">Seatbelt sandbox</option>
+                    <option value="docker">Docker container</option>
                   </select>
                 </label>
+                {def.isolation === "docker" && (
+                  <label className="field">Docker image<input type="text" placeholder="image with the runner CLI" value={def.runner.docker_image ?? ""} onChange={(e) => patch((d) => { d.runner.docker_image = e.target.value || undefined; })} /></label>
+                )}
+                <label className="field">Budget for one launch ($)<input type="number" min={0} step="0.5" placeholder="no cap" value={def.budget_usd ?? ""} onChange={(e) => patch((d) => { d.budget_usd = Number(e.target.value) > 0 ? Number(e.target.value) : undefined; })} /></label>
                 {def.isolation === "seatbelt" && (
                   <label className="field">Network
                     <select value={def.network} onChange={(e) => patch((d) => { d.network = e.target.value; })}>

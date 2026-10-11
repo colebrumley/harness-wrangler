@@ -220,12 +220,12 @@ impl Api {
                 let name: String = arg(args, "experiment")?;
                 let exp = p.load_experiment(&name)?;
                 let (id, warnings) = scheduler::create_launch(p, s, &exp, None, &opt::<String>(args, "note")?.unwrap_or_default())?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: false })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: false, budget_usd: None })?;
                 json!({"launch_id": id, "warnings": warnings})
             }
             "launch_resume" => {
                 let id: i64 = arg(args, "launch_id")?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: opt(args, "retry_failed")?.unwrap_or(true) })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: opt(args, "retry_failed")?.unwrap_or(true), budget_usd: opt(args, "budget_usd")? })?;
                 json!({"launch_id": id})
             }
             "launch_cancel" => {
@@ -251,7 +251,7 @@ impl Api {
             "judge_run" => {
                 // Fill in missing judge grades and pairwise comparisons.
                 let id: i64 = self.resolve(args)?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None })?;
                 json!({"launch_id": id})
             }
 
@@ -380,7 +380,7 @@ impl Api {
                     jobs.insert(name.clone(), SuiteJob { model: model.clone(), cancel: cancel.clone(), running: true, error: None });
                 }
                 let me = self.clone();
-                let opts = RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false };
+                let opts = RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None };
                 std::thread::spawn(move || {
                     let res = suite::run_model(&me.project, &me.store, &name, &model, &opts, cancel, &|e| {
                         if let Event::Started { launch_id, .. } | Event::Finished { launch_id, .. } = &e {
@@ -452,7 +452,7 @@ impl Api {
             "tasks": launch.tasks.iter().map(|t| &t.id).collect::<Vec<_>>(),
             "variants": launch.variants.iter().map(|v| json!({"key": v.key, "label": v.label})).collect::<Vec<_>>(),
             "runs_per_cell": launch.def.runs_per_cell,
-            "has_judge": launch.def.judge().is_some(), "human_review": launch.def.human_enabled(),
+            "budget_usd": launch.def.budget_usd, "has_judge": launch.def.judge().is_some(), "human_review": launch.def.human_enabled(),
             "cells": cells,
             "events": self.events.lock().unwrap().get(&id).map(|q| q.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(),
         }))

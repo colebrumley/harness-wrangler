@@ -332,7 +332,17 @@ impl Project {
             }
         }
         if exp.isolation == Isolation::Docker {
-            bail!("isolation = \"docker\" is not implemented; use \"workspace\" or \"seatbelt\"");
+            if exp.runner.docker_image.as_deref().unwrap_or("").is_empty() {
+                bail!("isolation = \"docker\" needs [runner] docker_image: an image with the runner CLI installed");
+            }
+            let up = std::process::Command::new("docker").arg("info").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+            if !up {
+                bail!("isolation = \"docker\" needs a running Docker daemon (`docker info` failed)");
+            }
+            warnings.push("docker isolation: a subscription login lives in the macOS keychain and does not exist in a container. The runner must authenticate from an environment variable passed with [runner] docker_env (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN and OPENAI_API_KEY pass by default when set).".into());
+            if exp.network == NetworkPolicy::Anthropic {
+                warnings.push("docker isolation does not apply network = \"anthropic\"; restrict the network with [runner] docker_args instead".into());
+            }
         }
         let variants = exp.variants();
         warnings.extend(crate::runner::capability_warnings(exp, &variants)?);

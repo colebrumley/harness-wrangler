@@ -51,6 +51,9 @@ enum Cmd {
         no_judge: bool,
         #[arg(long, default_value = "")]
         note: String,
+        /// Spending cap in USD for this launch (overrides budget_usd).
+        #[arg(long)]
+        budget: Option<f64>,
     },
     /// Continue an interrupted or cancelled launch.
     Resume {
@@ -62,6 +65,9 @@ enum Cmd {
         concurrency: Option<usize>,
         #[arg(long)]
         no_judge: bool,
+        /// New spending cap in USD for this launch (after a budget stop).
+        #[arg(long)]
+        budget: Option<f64>,
     },
     /// Run (or finish) the LLM judge phase of a launch.
     Judge {
@@ -430,8 +436,11 @@ fn real_main(cli: Cli) -> Result<()> {
                 println!("warning: {w}");
             }
         }
-        Cmd::Run { experiment, reps, concurrency, no_judge, note } => {
+        Cmd::Run { experiment, reps, concurrency, no_judge, note, budget } => {
             let mut exp = project.load_experiment(&experiment)?;
+            if budget.is_some() {
+                exp.budget_usd = budget;
+            }
             if let Some(r) = reps {
                 exp.runs_per_cell = r.max(1);
             }
@@ -440,13 +449,13 @@ fn real_main(cli: Cli) -> Result<()> {
                 eprintln!("warning: {w}");
             }
             let cancel = cancel_on_sigint();
-            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed: false }, cancel, &progress_sink(json))?;
+            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed: false, budget_usd: None }, cancel, &progress_sink(json))?;
             finish_run_output(&store, id, json)?;
         }
-        Cmd::Resume { launch, retry_failed, concurrency, no_judge } => {
+        Cmd::Resume { launch, retry_failed, concurrency, no_judge, budget } => {
             let id = store.resolve_launch(&launch)?;
             let cancel = cancel_on_sigint();
-            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed }, cancel, &progress_sink(json))?;
+            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed, budget_usd: budget }, cancel, &progress_sink(json))?;
             finish_run_output(&store, id, json)?;
         }
         Cmd::Judge { launch, concurrency } => {
@@ -604,7 +613,7 @@ fn real_main(cli: Cli) -> Result<()> {
             }
             SuiteCmd::Run { name, model, concurrency } => {
                 let cancel = cancel_on_sigint();
-                let launches = suite::run_model(&project, &store, &name, &model, &RunOptions { concurrency, skip_judge: false, retry_failed: false }, cancel, &progress_sink(json))?;
+                let launches = suite::run_model(&project, &store, &name, &model, &RunOptions { concurrency, skip_judge: false, retry_failed: false, budget_usd: None }, cancel, &progress_sink(json))?;
                 let dash = suite::dashboard(&project, &store, &name)?;
                 if json {
                     return print_json(&json!({"launches": launches, "dashboard": dash}));

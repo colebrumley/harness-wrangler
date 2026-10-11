@@ -116,10 +116,14 @@ impl AgentRunner for ClaudeCodeRunner {
         if let Some(sb) = &sandbox {
             sb.apply(&mut spec);
         }
+        let docker = crate::isolation::DockerRun::wrap(ws, limits, &mut spec, &[])?;
         let out = exec(&spec)?;
         let mut rec = parse_stream(&out.stdout);
         if let Some(sb) = sandbox {
             rec.events.extend(sb.finish());
+        }
+        if let Some(d) = docker {
+            rec.events.extend(d.finish());
         }
         rec.command = command;
         rec.raw_output = out.stdout;
