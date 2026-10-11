@@ -47,14 +47,16 @@ export default function Review({ ctx }: { ctx: Ctx }) {
     if (!item || voted) return;
     try {
       const r = await call("review_vote", { launch_id: id, left_run: item.left.run_id, right_run: item.right.run_id, choice, reason });
+      ctx.reviewChanged();
       if (choice === "skip" || auto) { await load(); return; }
       setVoted(choice); setReveal(r);
     } catch (e: any) { setError(String(e.message ?? e)); }
-  }, [item, voted, id, reason, auto, load]);
+  }, [item, voted, id, reason, auto, load, ctx.reviewChanged]);
 
   const undo = async () => {
     if (!reveal) return;
     await call("review_undo", { judgment_id: reveal.judgment_id });
+    ctx.reviewChanged();
     setReveal(null); setVoted(null);
   };
 

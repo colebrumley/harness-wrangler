@@ -278,6 +278,22 @@ function PairwisePanel({ p }: { p: any }) {
         {p.human_judge_agreement !== null && p.human_judge_agreement !== undefined && (
           <div className="note">Human and judge agreed on {Math.round(p.human_judge_agreement * 100)}% of the {p.human_judge_overlap} pairs both have judged.</div>
         )}
+        {p.human_votes?.length > 0 && (
+          <div>
+            <h3 style={{ marginBottom: 4 }}>Your votes</h3>
+            <div className="feed">
+              {p.human_votes.map((v: any) => (
+                <div key={`${v.run_a}|${v.run_b}`}>
+                  <span className="score">{v.winner === "tie" ? "tie" : v.winner === "both_bad" ? "both bad" : "won"}</span>
+                  <div>
+                    <div className="who">{v.task_id}: {v.a} <span className="faint">vs</span> {v.b}</div>
+                    <div>{v.winner === "a" || v.winner === "b" ? <b>{v.winner === "a" ? v.a : v.b}. </b> : null}{v.reason || <span className="faint">No reason given.</span>}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </Panel>
   );

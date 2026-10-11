@@ -127,9 +127,14 @@ fn review_queue_votes_annotations_and_advice() {
 
     // Human votes now feed the pairwise report alongside the judge.
     let rep = wrangler_core::report::build(&store, launch, None).unwrap();
+    let text = wrangler_core::report::render_text(&rep);
     let pw = rep.pairwise.unwrap();
     assert!(pw.rankings.iter().any(|r| r.source == "human") && pw.rankings.iter().any(|r| r.source == "all"));
     assert!(pw.human_judge_overlap > 0);
+    // The reviewer's one-line reason travels with the vote, in the report and its text form.
+    let why = pw.human_votes.iter().find(|v| v.reason == "tighter").expect("vote reason is reported");
+    assert_ne!(why.a, why.b);
+    assert!(text.contains(": tighter\n"));
 
     // benchmark.json export in the skill-creator shape.
     let bench = interop::export_benchmark(&store, launch, Some("plain · medium"), Some("none · medium")).unwrap();

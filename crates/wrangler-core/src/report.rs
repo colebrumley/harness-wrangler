@@ -132,6 +132,20 @@ pub struct PositionBias {
     pub decided_picks: usize,
 }
 
+/// One human vote, with the variants named and the reviewer's reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanVote {
+    pub task_id: String,
+    pub a: String,
+    pub b: String,
+    /// a | b | tie | both_bad
+    pub winner: String,
+    pub reason: String,
+    pub run_a: i64,
+    pub run_b: i64,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pairwise {
     pub variants: Vec<String>,
@@ -140,6 +154,9 @@ pub struct Pairwise {
     /// Among run pairs judged by both a human and the judge, how often they agreed.
     pub human_judge_agreement: Option<f64>,
     pub human_judge_overlap: usize,
+    /// Every human vote, newest first.
+    #[serde(default)]
+    pub human_votes: Vec<HumanVote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,12 +587,31 @@ fn build_pairwise(data: &Data, judgments: &[Judgment], launch_id: i64) -> Option
             }
         }
     }
+    let human_votes = judgments
+        .iter()
+        .rev()
+        .filter(|j| j.source == "human")
+        .filter_map(|j| {
+            let (ia, ib) = (*vidx.get(&j.run_a)?, *vidx.get(&j.run_b)?);
+            Some(HumanVote {
+                task_id: j.task_id.clone(),
+                a: variants[ia].label.clone(),
+                b: variants[ib].label.clone(),
+                winner: j.winner.clone(),
+                reason: j.reason.clone(),
+                run_a: j.run_a,
+                run_b: j.run_b,
+                created_at: j.created_at.clone(),
+            })
+        })
+        .collect();
     Some(Pairwise {
         variants: variants.iter().map(|v| v.label.clone()).collect(),
         rankings,
         position_bias,
         human_judge_agreement: (overlap > 0).then(|| agree as f64 / overlap as f64),
         human_judge_overlap: overlap,
+        human_votes,
     })
 }
 
@@ -777,6 +813,19 @@ pub fn render_text(r: &Report) -> String {
         }
         if let Some(a) = p.human_judge_agreement {
             s.push_str(&format!("  human–judge agreement: {:.0}% over {} shared pairs\n", a * 100.0, p.human_judge_overlap));
+        }
+        let reasons: Vec<&HumanVote> = p.human_votes.iter().filter(|v| !v.reason.is_empty()).collect();
+        if !reasons.is_empty() {
+            s.push_str("\nHUMAN VOTE REASONS\n");
+            for v in reasons {
+                let pick = match v.winner.as_str() {
+                    "a" => format!("preferred {} over {}", v.a, v.b),
+                    "b" => format!("preferred {} over {}", v.b, v.a),
+                    "both_bad" => format!("{} and {} both bad", v.a, v.b),
+                    _ => format!("{} and {} tied", v.a, v.b),
+                };
+                s.push_str(&format!("  {}: {pick}: {}\n", v.task_id, v.reason));
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { LaunchSummary, call, inTauri, pickFolder, shell, usd, when } from "./api";
 import { ErrorNote, StatusChip } from "./components";
 import { useLoad, useRoute } from "./hooks";
@@ -28,6 +28,8 @@ export interface Ctx {
   go: (path: string) => void;
   openRun: (id: number, blind?: boolean) => void;
   reloadLaunches: () => void;
+  /** A vote was cast or undone: the Review badge is out of date. */
+  reviewChanged: () => void;
 }
 
 /** Desktop only: pick or create the project folder before anything else. */
@@ -132,10 +134,12 @@ export default function App() {
   const launchId = known(routeLaunch) ?? known(sticky) ?? launches[0]?.id ?? null;
   const current = launches.find((l) => l.id === launchId);
 
+  const [reviewTick, setReviewTick] = useState(0);
+  const reviewChanged = useCallback(() => setReviewTick((n) => n + 1), []);
   const ctx: Ctx = useMemo(() => ({
-    launches, launchId, go, reloadLaunches: launchesQ.reload,
+    launches, launchId, go, reloadLaunches: launchesQ.reload, reviewChanged,
     openRun: (id: number, blind = false) => setRun({ id, blind }),
-  }), [launches, launchId, go, launchesQ.reload]);
+  }), [launches, launchId, go, launchesQ.reload, reviewChanged]);
 
   const [reviewLeft, setReviewLeft] = useState<number | null>(null);
   useEffect(() => {
@@ -144,7 +148,7 @@ export default function App() {
     let live = true;
     call("review_next", { launch_id: launchId }).then((r) => { if (live) setReviewLeft(r.progress?.recommended_left ?? null); }).catch(() => setReviewLeft(null));
     return () => { live = false; };
-  }, [launchId, ready, view]);
+  }, [launchId, ready, view, reviewTick]);
 
   if (!ready) return <div className="app" style={{ gridTemplateColumns: "1fr" }}>{menuError && <div style={{ padding: "16px 24px 0" }}><ErrorNote error={menuError} /></div>}<ProjectGate key={menuError ?? ""} onReady={() => { setReady(true); setProjectKey((k) => k + 1); }} /></div>;
 
