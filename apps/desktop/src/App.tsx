@@ -161,7 +161,7 @@ export default function App() {
         {NAV.map(([id, label]) => (
           <a key={id} href={href(id)} className={view === id ? "on" : ""} aria-current={view === id ? "page" : undefined}>
             {label}
-            {id === "review" && reviewLeft ? <span className="badge" title={`${reviewLeft} pairs left in this launch's starter set`}>{reviewLeft}</span> : null}
+            {id === "review" && reviewLeft ? <span className="badge" title={`${reviewLeft} ${reviewLeft === 1 ? "task" : "tasks"} left to review in this launch, one pair each`}>{reviewLeft}</span> : null}
           </a>
         ))}
         <div className="foot">

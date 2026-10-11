@@ -6,14 +6,15 @@ import { Annotation, TextLines } from "./TextLines";
 
 const WHY: Record<string, string> = {
   undecided_comparison: "this comparison is still undecided",
-  task_unreviewed: "no one has reviewed this task for it yet",
+  task_unreviewed: "it has no vote on this task yet",
   judge_inconsistent: "the LLM judge changed its mind when the order was swapped",
 };
 type Choice = "left" | "right" | "tie" | "both_bad" | "skip";
 
 /**
- * Blind pairwise review. The queue hands over the pair that most reduces
- * uncertainty; which variant produced which side is shown only after voting.
+ * Blind pairwise review. The queue asks about each task once, with the pair
+ * that most reduces uncertainty; which variant produced which side is shown
+ * only after voting.
  */
 export default function Review({ ctx }: { ctx: Ctx }) {
   const id = ctx.launchId;
@@ -100,8 +101,8 @@ export default function Review({ ctx }: { ctx: Ctx }) {
       <div className="content">
         <Empty title={`Starter set done: ${progress.votes} pair${progress.votes === 1 ? "" : "s"} reviewed`}>
           <p style={{ maxWidth: "60ch", margin: "0 auto 14px" }}>
-            Those were the pairs expected to settle the most. Your votes are already in the results, next to the judge's.
-            You can stop here. {progress.useful_remaining > 0 ? `${progress.useful_remaining} more pairs sit in comparisons that are still undecided, if you want to add evidence.` : "Every comparison is already decided one way or the other."}
+            That is one pair for every task. Your votes are already in Results: they rank the variants next to the judge's ranking, and show how often the judge agrees with you.
+            You can stop here. {progress.useful_remaining > 0 ? `${progress.useful_remaining} more pairs sit in comparisons that are still undecided, if you want to add evidence. They repeat tasks you have seen, each with two results you have not.` : "Every comparison is already decided one way or the other."}
           </p>
           <div className="row" style={{ justifyContent: "center" }}>
             <a className="btn primary" style={{ textDecoration: "none" }} href={`#/results/${id}`}>See the results</a>
@@ -145,7 +146,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
                 <h2>{item.task_id}</h2>
                 <span className="muted small">
                   {progress.recommended_left > 0
-                    ? `Pair ${Math.min(progress.votes + 1, progress.recommended)} of ${progress.recommended} in the starter set, chosen to settle the most. About a minute each.`
+                    ? `Task ${progress.recommended - progress.recommended_left + 1} of ${progress.recommended} in the starter set: one pair per task, chosen to settle the most. About a minute each.`
                     : `${progress.votes} reviewed. Past the starter set; stop whenever you like.`}
                 </span>
               </div>
@@ -156,6 +157,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
               {hasDiff && <Seg options={[["output", item.output_file ?? "Final message"], ["diff", "Other changes"]]} value={show} onChange={setShow} />}
             </div>
           </div>
+          {item.task_votes > 0 && <p className="muted small" style={{ marginTop: 4 }}>You have reviewed this task before. These are two different results for it, not the pair you already voted on.</p>}
           {item.why.length > 0 && <p className="faint small" style={{ marginTop: 4 }}>Picked because {item.why.map((w: string) => WHY[w] ?? w).join(", and ")}.</p>}
           <ErrorNote error={error} />
         </div>

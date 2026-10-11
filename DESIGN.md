@@ -132,6 +132,7 @@ Blind pairwise is the primary human task. Design requirements from Cole:
 - Prefer A, prefer B, tie, both bad. Optional one-line reason.
 - Keyboard-first: vote, next, skip.
 - A review queue: the tool picks the pairs that most reduce uncertainty in the current comparison, so the human reviews fewer items.
+- Ask about each task once. The starter set is one pair per task. A second pair on a task the reviewer has seen is opt-in and labelled as such, because two results for the same prompt read like a repeat when the variants are hidden.
 
 Annotations are stored structurally so an agent can later read them when improving the skill ("humans flagged these sentences as hedging in 4 of 6 runs").
 

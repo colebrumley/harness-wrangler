@@ -12,6 +12,46 @@ fn no_cancel() -> Arc<AtomicBool> {
 }
 
 #[test]
+fn review_queue_asks_about_each_task_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = common::project(tmp.path());
+    let store = Store::open(&project.db_path()).unwrap();
+    let exp = project.load_experiment("demo").unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), no_cancel(), &|_| {}).unwrap();
+
+    // The starter set is one pair per task, however many pairs there are.
+    let start = review::progress(&store, launch).unwrap();
+    assert_eq!((start.recommended, start.recommended_left), (3, 3));
+    assert!(start.total_remaining > 3);
+
+    // A skipped task goes to the back of the line and still owes a vote.
+    let first = review::next(&store, launch).unwrap().unwrap();
+    review::vote(&store, launch, first.left.run_id, first.right.run_id, "skip", "").unwrap();
+    let mut seen = vec![];
+    for left in [3, 2] {
+        let it = review::next(&store, launch).unwrap().unwrap();
+        assert_eq!((it.task_votes, it.progress.recommended_left), (0, left));
+        assert_ne!(it.task_id, first.task_id);
+        review::vote(&store, launch, it.left.run_id, it.right.run_id, "left", "").unwrap();
+        seen.push(it.task_id);
+    }
+    assert_ne!(seen[0], seen[1]);
+    let last = review::next(&store, launch).unwrap().unwrap();
+    assert_eq!((last.task_id.as_str(), last.task_votes, last.progress.recommended_left), (first.task_id.as_str(), 0, 1));
+
+    // Voting twice on one pair leaves one vote.
+    review::vote(&store, launch, last.left.run_id, last.right.run_id, "left", "").unwrap();
+    review::vote(&store, launch, last.right.run_id, last.left.run_id, "tie", "").unwrap();
+    let done = review::progress(&store, launch).unwrap();
+    assert_eq!((done.votes, done.recommended, done.recommended_left), (3, 3, 0));
+
+    // Past the starter set every pair repeats a task, and the item says so.
+    let more = review::next(&store, launch).unwrap().unwrap();
+    assert_eq!(more.task_votes, 1);
+}
+
+#[test]
 fn review_queue_votes_annotations_and_advice() {
     let tmp = tempfile::tempdir().unwrap();
     let project = common::project(tmp.path());

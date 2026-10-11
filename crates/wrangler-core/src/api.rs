@@ -520,10 +520,10 @@ impl Api {
             "action": run_target.map(|n| json!({"label": if running.is_some() { "Watch progress" } else if finished.is_some() { "Open the launch" } else { "Open and run" }, "href": format!("/experiments/{n}")}))}));
         steps.push(match &review {
             Some((id, pr)) => json!({"id": "review", "title": "Review a few pairs yourself", "done": pr.recommended_left == 0 && pr.votes > 0 || pr.recommended == 0,
-                "detail": if pr.recommended == 0 { "Nothing to compare in this launch.".to_string() } else if pr.recommended_left == 0 { format!("{} reviewed. That is the starter set; more is optional.", pr.votes) } else { format!("{} of {} done. Blind, side by side, keyboard driven. These are the pairs that settle the most.", pr.votes.min(pr.recommended), pr.recommended) },
+                "detail": if pr.recommended == 0 { "Nothing to compare in this launch.".to_string() } else if pr.recommended_left == 0 { format!("{} reviewed, one pair or more for every task. More is optional.", pr.votes) } else { format!("{} of {} done. Blind, side by side, keyboard driven. One pair per task, the one that settles the most.", pr.recommended - pr.recommended_left, pr.recommended) },
                 "time": "about a minute per pair", "action": {"label": "Open Review", "href": format!("/review/{id}")}}),
             None => json!({"id": "review", "title": "Review a few pairs yourself", "done": false, "optional": true,
-                "detail": "After a run, the app picks the handful of pairs where your judgment matters most. Optional, and worth it when the judge and the numbers disagree.", "time": "about a minute per pair", "action": Value::Null}),
+                "detail": "After a run, the app picks one pair per task where your judgment matters most. Optional, and worth it when the judge and the numbers disagree.", "time": "about a minute per pair", "action": Value::Null}),
         });
         steps.push(json!({"id": "results", "title": "Read the results and act on the advice", "done": false,
             "detail": match finished { Some(l) => format!("Results and advice for launch #{} are ready.", l.id), None => "Effect sizes with confidence intervals, per task and per model, then a short list of what to change.".to_string() },

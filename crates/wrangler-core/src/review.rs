@@ -1,6 +1,7 @@
 //! Human review: the blind pairwise queue, votes, and annotation digests.
 //!
-//! The queue serves the pair that most reduces uncertainty in the current
+//! The queue asks about each task once before it repeats any, and within a
+//! task serves the pair that most reduces uncertainty in the current
 //! comparison, so the reviewer sees fewer items. Variant identity is never
 //! in a queue item; it is revealed only by the vote response.
 
@@ -29,6 +30,9 @@ pub struct ReviewItem {
     pub task_prompt: String,
     pub expected_output: String,
     pub output_file: Option<String>,
+    /// Pairs of this task the reviewer has already voted on. Above zero, the
+    /// prompt is one they have seen, with two results they have not.
+    pub task_votes: usize,
     pub left: Side,
     pub right: Side,
     /// Why this pair was chosen, without naming variants:
@@ -44,14 +48,14 @@ pub struct Progress {
     /// Unreviewed pairs in comparisons that are still undecided.
     pub useful_remaining: usize,
     pub total_remaining: usize,
-    /// Size of the starter set: the few most informative pairs to review
-    /// first. Everything beyond it is optional.
+    /// Size of the starter set: one pair per task, the most informative
+    /// one. Everything beyond it repeats a task and is optional.
     pub recommended: usize,
     pub recommended_left: usize,
 }
 
-/// How many pairs to ask for up front. Enough to touch each task and each
-/// clean comparison once or twice, never a wall of hundreds.
+/// The most pairs to ask for up front. The starter set is one pair per
+/// task, so a second look at the same prompt is always the reviewer's choice.
 pub const STARTER_SET: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +75,9 @@ struct Candidate {
     b: i64,
     vi: usize,
     vj: usize,
+    /// Human votes and skips already recorded on this task, any variants.
+    task_votes: usize,
+    task_skips: usize,
 }
 
 struct Queue {
@@ -98,6 +105,8 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
     let mut wins: HashMap<(usize, usize), (f64, f64)> = HashMap::new();
     let mut human_done: HashMap<(i64, i64), ()> = HashMap::new();
     let mut task_votes: HashMap<(String, usize, usize), f64> = HashMap::new();
+    let mut voted_on_task: HashMap<String, usize> = HashMap::new();
+    let mut skipped_on_task: HashMap<String, usize> = HashMap::new();
     let mut judge_inconsistent: HashMap<(i64, i64), ()> = HashMap::new();
     let mut progress = Progress::default();
     for j in judgments {
@@ -106,9 +115,11 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
             human_done.insert(pair_key(j.run_a, j.run_b), ());
             if j.winner == "skip" {
                 progress.skipped += 1;
+                *skipped_on_task.entry(j.task_id.clone()).or_default() += 1;
                 continue;
             }
             progress.votes += 1;
+            *voted_on_task.entry(j.task_id.clone()).or_default() += 1;
             *task_votes.entry((j.task_id.clone(), ia.min(ib), ia.max(ib))).or_default() += 1.0;
         } else if j.consistent == Some(false) {
             judge_inconsistent.insert(pair_key(j.run_a, j.run_b), ());
@@ -170,14 +181,20 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
                         progress.useful_remaining += 1;
                     }
                     progress.total_remaining += 1;
-                    candidates.push((Candidate { task: t.id.clone(), a: ra.id, b: rb.id, vi: i, vj: j }, priority, why));
+                    let on_task = |m: &HashMap<String, usize>| m.get(&t.id).copied().unwrap_or(0);
+                    candidates.push((Candidate { task: t.id.clone(), a: ra.id, b: rb.id, vi: i, vj: j, task_votes: on_task(&voted_on_task), task_skips: on_task(&skipped_on_task) }, priority, why));
                 }
             }
         }
     }
-    let pool = progress.votes + progress.total_remaining;
-    progress.recommended = STARTER_SET.min(pool);
-    progress.recommended_left = progress.recommended.saturating_sub(progress.votes).min(progress.total_remaining);
+    // The starter set is one vote per task. A second vote on a task does not
+    // stand in for a task that has none.
+    let reviewed = launch.tasks.iter().filter(|t| voted_on_task.contains_key(&t.id)).count();
+    let mut unreviewed: Vec<&str> = candidates.iter().filter(|c| c.0.task_votes == 0).map(|c| c.0.task.as_str()).collect();
+    unreviewed.sort();
+    unreviewed.dedup();
+    progress.recommended = STARTER_SET.min(reviewed + unreviewed.len());
+    progress.recommended_left = progress.recommended.saturating_sub(reviewed).min(unreviewed.len());
     Queue { candidates, progress }
 }
 
@@ -191,8 +208,13 @@ pub fn next(store: &Store, launch_id: i64) -> Result<Option<ReviewItem>> {
     let launch = store.launch(launch_id)?;
     let runs = store.runs(launch_id)?;
     let queue = build_queue(&launch, &runs, &store.judgments(launch_id, None)?);
+    // Tasks with no vote come first, and among those the ones not yet skipped,
+    // so no prompt comes round again while another is still waiting.
     let best = queue.candidates.iter().max_by(|x, y| {
-        x.1.total_cmp(&y.1).then_with(|| hash_u64(&format!("{}|{}", x.0.a, x.0.b)).cmp(&hash_u64(&format!("{}|{}", y.0.a, y.0.b))))
+        (y.0.task_votes, y.0.task_skips)
+            .cmp(&(x.0.task_votes, x.0.task_skips))
+            .then_with(|| x.1.total_cmp(&y.1))
+            .then_with(|| hash_u64(&format!("{}|{}", x.0.a, x.0.b)).cmp(&hash_u64(&format!("{}|{}", y.0.a, y.0.b))))
     });
     let Some((cand, _, why)) = best else { return Ok(None) };
     let _ = (cand.vi, cand.vj);
@@ -211,6 +233,7 @@ pub fn next(store: &Store, launch_id: i64) -> Result<Option<ReviewItem>> {
         task_prompt: task.prompt.clone(),
         expected_output: task.expected_output.clone(),
         output_file: task.output_file.clone(),
+        task_votes: cand.task_votes,
         left: side(l)?,
         right: side(r)?,
         why: why.clone(),
@@ -232,6 +255,12 @@ pub fn vote(store: &Store, launch_id: i64, left_run: i64, right_run: i64, choice
     let (l, r) = (store.run(left_run)?, store.run(right_run)?);
     if l.launch_id != launch_id || r.launch_id != launch_id || l.task_id != r.task_id {
         bail!("runs {left_run} and {right_run} are not a pair in launch {launch_id}");
+    }
+    // One human vote per pair: a repeated vote replaces the earlier one.
+    for old in store.judgments(launch_id, Some("human"))? {
+        if (old.run_a, old.run_b) == (left_run, right_run) || (old.run_a, old.run_b) == (right_run, left_run) {
+            store.delete_judgment(old.id)?;
+        }
     }
     let judgment_id = store.add_judgment(&Judgment {
         id: 0,
