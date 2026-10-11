@@ -1,0 +1,723 @@
+//! The report model: everything the CLI and GUI show for one launch, computed
+//! from the store on demand.
+
+use crate::model::*;
+use crate::stats::{self, Bout, BtItem, Direction, Effect, MetricInfo, Summary, Verdict};
+use crate::store::{Judgment, Launch, RunRow, Store};
+use crate::util::hash_u64;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Counts {
+    pub total: usize,
+    pub done: usize,
+    pub failed: usize,
+    pub timeout: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub cancelled: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorInfo {
+    pub name: String,
+    pub kind: String,
+    pub levels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariantSummary {
+    pub key: String,
+    pub label: String,
+    pub levels: BTreeMap<String, String>,
+    pub runner: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub counts: Counts,
+    pub metrics: BTreeMap<String, Summary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comparison {
+    /// `factor`: one level against the factor's first level, paired by task
+    /// and the other factors. `variant`: one variant against the first, paired by task.
+    pub kind: String,
+    pub factor: Option<String>,
+    pub baseline: String,
+    pub level: String,
+    /// For `variant` comparisons, the variant key.
+    pub variant_key: Option<String>,
+    pub metric: String,
+    #[serde(flatten)]
+    pub effect: Effect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cell {
+    pub variant_key: String,
+    pub counts: Counts,
+    pub metrics: BTreeMap<String, Summary>,
+    /// Metrics on which this cell's spread marks the task as flaky.
+    pub flaky: Vec<String>,
+    pub run_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskBreakdown {
+    pub task_id: String,
+    pub tags: Vec<String>,
+    pub cells: Vec<Cell>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Flaky {
+    pub task_id: String,
+    pub variant: String,
+    pub metric: String,
+    pub mean: f64,
+    pub sd: f64,
+    pub n: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairCount {
+    pub a: String,
+    pub b: String,
+    pub a_wins: f64,
+    pub b_wins: f64,
+    pub ties: f64,
+    pub both_bad: f64,
+    /// Share of decided-or-tied votes going to `b` (ties count half), with a bootstrapped CI.
+    pub b_rate: Option<Summary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ranking {
+    /// judge | human | all
+    pub source: String,
+    pub votes: usize,
+    /// Bradley–Terry strengths in variant order. Used when there are more than two variants.
+    pub strengths: Vec<BtItem>,
+    pub pairs: Vec<PairCount>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PositionBias {
+    /// Pairs judged in both orders.
+    pub pairs: usize,
+    /// Pairs where the two orders disagreed.
+    pub inconsistent: usize,
+    pub inconsistent_rate: f64,
+    /// Share of non-tie picks that went to whichever result was listed first. 0.5 is unbiased.
+    pub first_position_rate: f64,
+    pub decided_picks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pairwise {
+    pub variants: Vec<String>,
+    pub rankings: Vec<Ranking>,
+    pub position_bias: Option<PositionBias>,
+    /// Among run pairs judged by both a human and the judge, how often they agreed.
+    pub human_judge_agreement: Option<f64>,
+    pub human_judge_overlap: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectionAttribution {
+    pub index: usize,
+    pub title: String,
+    pub overlay_label: String,
+    pub est_tokens: u64,
+    pub lines: (usize, usize),
+    /// full − without-this-section on the primary metric. Positive means the section contributes.
+    pub effect: Option<Effect>,
+    /// carries | hurts | no_effect | inconclusive | no_data
+    pub attribution: String,
+    /// full − without-this-section on cost and tokens: what the section costs per run.
+    pub cost_effect: Option<Effect>,
+    pub tokens_effect: Option<Effect>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AblationReport {
+    pub source: String,
+    pub kind: String,
+    pub metric: String,
+    /// full − none.
+    pub full_effect: Option<Effect>,
+    /// description-only − none: what triggering alone buys.
+    pub description_only_effect: Option<Effect>,
+    /// full − description-only: what the body adds beyond the description.
+    pub body_effect: Option<Effect>,
+    pub skill_invoked_rate: Option<f64>,
+    pub sections: Vec<SectionAttribution>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventCounts {
+    pub rate_limited_runs: usize,
+    pub retries: usize,
+    pub timeouts: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Report {
+    pub launch_id: i64,
+    pub experiment: String,
+    pub description: String,
+    pub status: String,
+    pub phase: String,
+    pub created_at: String,
+    pub def_hash: String,
+    pub runs_per_cell: u32,
+    pub counts: Counts,
+    pub cost_usd: f64,
+    pub judge_cost_usd: f64,
+    pub primary_metric: String,
+    pub metrics: Vec<MetricInfo>,
+    pub factors: Vec<FactorInfo>,
+    pub variants: Vec<VariantSummary>,
+    pub comparisons: Vec<Comparison>,
+    pub tasks: Vec<TaskBreakdown>,
+    pub flaky: Vec<Flaky>,
+    pub pairwise: Option<Pairwise>,
+    pub ablation: Option<AblationReport>,
+    pub events: EventCounts,
+    pub warnings: Vec<String>,
+}
+
+fn count(runs: &[&RunRow]) -> Counts {
+    let mut c = Counts { total: runs.len(), ..Default::default() };
+    for r in runs {
+        match r.status.as_str() {
+            "done" => c.done += 1,
+            "failed" => c.failed += 1,
+            "timeout" => c.timeout += 1,
+            "pending" => c.pending += 1,
+            "running" => c.running += 1,
+            _ => c.cancelled += 1,
+        }
+    }
+    c
+}
+
+/// Loaded launch data with the lookups the analyses share.
+pub struct Data {
+    pub launch: Launch,
+    pub runs: Vec<RunRow>,
+    pub metrics: HashMap<i64, BTreeMap<String, f64>>,
+}
+
+impl Data {
+    pub fn load(store: &Store, launch_id: i64) -> Result<Data> {
+        Ok(Data { launch: store.launch(launch_id)?, runs: store.runs(launch_id)?, metrics: store.metrics_for_launch(launch_id)? })
+    }
+
+    fn values(&self, metric: &str, pred: &dyn Fn(&RunRow) -> bool) -> Vec<f64> {
+        self.runs.iter().filter(|r| pred(r)).filter_map(|r| self.metrics.get(&r.id)?.get(metric).copied()).collect()
+    }
+
+    fn variant(&self, key: &str) -> Option<&Variant> {
+        self.launch.variants.iter().find(|v| v.key == key)
+    }
+
+    pub fn available_metrics(&self) -> Vec<String> {
+        let present: BTreeSet<&str> = self.metrics.values().flat_map(|m| m.keys().map(|k| k.as_str())).collect();
+        let mut out: Vec<String> = stats::HEADLINE.iter().filter(|m| present.contains(**m)).map(|s| s.to_string()).collect();
+        if present.contains("mock_quality") {
+            out.push("mock_quality".into());
+        }
+        out
+    }
+
+    pub fn primary_metric(&self) -> String {
+        if let Some(m) = &self.launch.def.primary_metric {
+            return m.clone();
+        }
+        let avail = self.available_metrics();
+        for m in ["judge_score", "pass", "expectations_passed", "checks_passed"] {
+            if avail.iter().any(|a| a == m) {
+                return m.to_string();
+            }
+        }
+        avail.first().cloned().unwrap_or_else(|| "cost_usd".into())
+    }
+
+    /// Paired effect of the runs matching `treat` against those matching
+    /// `control`, pairing on the unit key (task, plus whatever else the
+    /// caller holds fixed).
+    pub fn effect(&self, metric: &str, control: &dyn Fn(&RunRow) -> bool, treat: &dyn Fn(&RunRow) -> bool, unit: &dyn Fn(&RunRow) -> String) -> Option<Effect> {
+        let mut units: BTreeMap<String, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
+        for r in &self.runs {
+            let Some(v) = self.metrics.get(&r.id).and_then(|m| m.get(metric)).copied() else { continue };
+            if control(r) {
+                units.entry(unit(r)).or_default().0.push(v);
+            } else if treat(r) {
+                units.entry(unit(r)).or_default().1.push(v);
+            }
+        }
+        let units: Vec<(Vec<f64>, Vec<f64>)> = units.into_values().collect();
+        stats::paired_effect(&units, &stats::metric_info(metric), hash_u64(&format!("{}|{metric}", self.launch.id)))
+    }
+
+    /// Effect of one overlay-factor level against another, paired by task
+    /// and the remaining factors.
+    pub fn level_effect(&self, metric: &str, factor: &str, base_label: &str, level_label: &str) -> Option<Effect> {
+        let label_of = |r: &RunRow| self.variant(&r.variant_key).and_then(|v| v.level_label(factor)).map(|s| s.to_string());
+        let rest = |r: &RunRow| {
+            let others = self.variant(&r.variant_key).map(|v| v.levels.iter().filter(|(n, _)| n != factor).map(|(n, l)| format!("{n}={}", l.label)).collect::<Vec<_>>().join("|")).unwrap_or_default();
+            format!("{}#{others}", r.task_id)
+        };
+        self.effect(metric, &|r| label_of(r).as_deref() == Some(base_label), &|r| label_of(r).as_deref() == Some(level_label), &rest)
+    }
+}
+
+fn level_label_for_value(exp: &Experiment, factor: &str, value: &str) -> Option<String> {
+    exp.factors.iter().find(|f| f.name == factor)?.levels.iter().find(|l| l.value() == value).map(|l| l.label())
+}
+
+pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Result<Report> {
+    let data = Data::load(store, launch_id)?;
+    let launch = &data.launch;
+    let exp = &launch.def;
+    let metric_names = data.available_metrics();
+    let primary = metric_override.map(|s| s.to_string()).unwrap_or_else(|| data.primary_metric());
+    let mut warnings = vec![];
+    if metric_override.is_some() && !data.metrics.values().any(|m| m.contains_key(&primary)) {
+        warnings.push(format!("no run has metric `{primary}`"));
+    }
+    let seed = |s: &str| hash_u64(&format!("{launch_id}|{s}"));
+    let all: Vec<&RunRow> = data.runs.iter().collect();
+
+    let summaries = |pred: &dyn Fn(&RunRow) -> bool, tag: &str| -> BTreeMap<String, Summary> {
+        metric_names.iter().filter_map(|m| stats::summarize(&data.values(m, pred), seed(&format!("{tag}|{m}"))).map(|s| (m.clone(), s))).collect()
+    };
+
+    let variants: Vec<VariantSummary> = launch
+        .variants
+        .iter()
+        .map(|v| VariantSummary {
+            key: v.key.clone(),
+            label: v.label.clone(),
+            levels: v.levels.iter().map(|(n, l)| (n.clone(), l.label.clone())).collect(),
+            runner: v.runner.clone(),
+            model: v.model.clone(),
+            effort: v.effort.clone(),
+            counts: count(&all.iter().copied().filter(|r| r.variant_key == v.key).collect::<Vec<_>>()),
+            metrics: summaries(&|r| r.variant_key == v.key, &v.key),
+        })
+        .collect();
+
+    let mut comparisons = vec![];
+    for f in &exp.factors {
+        let labels: Vec<String> = f.levels.iter().map(|l| l.label()).collect();
+        for level in labels.iter().skip(1) {
+            for m in &metric_names {
+                if let Some(effect) = data.level_effect(m, &f.name, &labels[0], level) {
+                    comparisons.push(Comparison { kind: "factor".into(), factor: Some(f.name.clone()), baseline: labels[0].clone(), level: level.clone(), variant_key: None, metric: m.clone(), effect });
+                }
+            }
+        }
+    }
+    if exp.factors.len() > 1 {
+        let base = &launch.variants[0];
+        for v in launch.variants.iter().skip(1) {
+            for m in &metric_names {
+                if let Some(effect) = data.effect(m, &|r| r.variant_key == base.key, &|r| r.variant_key == v.key, &|r| r.task_id.clone()) {
+                    comparisons.push(Comparison { kind: "variant".into(), factor: None, baseline: base.label.clone(), level: v.label.clone(), variant_key: Some(v.key.clone()), metric: m.clone(), effect });
+                }
+            }
+        }
+    }
+
+    let mut flaky = vec![];
+    let mut tasks = vec![];
+    for t in &launch.tasks {
+        let mut cells = vec![];
+        for v in &launch.variants {
+            let in_cell = |r: &RunRow| r.task_id == t.id && r.variant_key == v.key;
+            let cell_runs: Vec<&RunRow> = all.iter().copied().filter(|r| in_cell(r)).collect();
+            let mut cell_flaky = vec![];
+            for m in &metric_names {
+                let info = stats::metric_info(m);
+                if info.direction != Direction::Higher {
+                    continue;
+                }
+                let xs = data.values(m, &in_cell);
+                if stats::is_flaky(&xs, info.scale) {
+                    cell_flaky.push(m.clone());
+                    flaky.push(Flaky { task_id: t.id.clone(), variant: v.label.clone(), metric: m.clone(), mean: stats::mean(&xs), sd: stats::sd(&xs), n: xs.len() });
+                }
+            }
+            cells.push(Cell {
+                variant_key: v.key.clone(),
+                counts: count(&cell_runs),
+                metrics: summaries(&in_cell, &format!("{}|{}", t.id, v.key)),
+                flaky: cell_flaky,
+                run_ids: cell_runs.iter().map(|r| r.id).collect(),
+            });
+        }
+        tasks.push(TaskBreakdown { task_id: t.id.clone(), tags: t.tags.clone(), cells });
+    }
+
+    let mut events = EventCounts::default();
+    for r in &data.runs {
+        let evs = r.events.as_array().cloned().unwrap_or_default();
+        let retries = evs.iter().filter(|e| e["kind"] == "retry").count();
+        if evs.iter().any(|e| e["kind"] == "rate_limit") {
+            events.rate_limited_runs += 1;
+        }
+        events.retries += retries;
+        if r.status == "timeout" {
+            events.timeouts += 1;
+        }
+    }
+    let counts = count(&all);
+    if counts.failed > 0 {
+        warnings.push(format!("{} run(s) failed and are excluded from quality metrics", counts.failed));
+    }
+    if counts.timeout > 0 {
+        warnings.push(format!("{} run(s) timed out", counts.timeout));
+    }
+    if events.rate_limited_runs > 0 {
+        warnings.push(format!("{} run(s) hit a rate limit ({} retries); their wall time excludes backoff waits", events.rate_limited_runs, events.retries));
+    }
+
+    let judgments = store.judgments(launch_id, None)?;
+    let pairwise = build_pairwise(&data, &judgments, launch_id);
+    if let Some(pb) = pairwise.as_ref().and_then(|p| p.position_bias.as_ref()) {
+        if pb.pairs >= 6 && pb.inconsistent_rate > 0.3 {
+            warnings.push(format!("pairwise judge disagreed with itself across orders on {:.0}% of pairs; treat its votes with care", pb.inconsistent_rate * 100.0));
+        }
+    }
+    let ablation = exp.ablation.as_ref().map(|meta| build_ablation(&data, meta, &primary));
+    let sum = |name: &str| data.metrics.values().filter_map(|m| m.get(name)).sum::<f64>();
+
+    Ok(Report {
+        launch_id,
+        experiment: launch.experiment.clone(),
+        description: exp.description.clone(),
+        status: launch.status.clone(),
+        phase: launch.phase.clone(),
+        created_at: launch.created_at.clone(),
+        def_hash: launch.def_hash.clone(),
+        runs_per_cell: exp.runs_per_cell,
+        counts,
+        cost_usd: sum("cost_usd"),
+        judge_cost_usd: sum("judge_cost_usd") + judgments.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum::<f64>(),
+        primary_metric: primary,
+        metrics: metric_names.iter().map(|m| stats::metric_info(m)).collect(),
+        factors: exp.factors.iter().map(|f| FactorInfo { name: f.name.clone(), kind: f.kind.as_str().into(), levels: f.levels.iter().map(|l| l.label()).collect() }).collect(),
+        variants,
+        comparisons,
+        tasks,
+        flaky,
+        pairwise,
+        ablation,
+        events,
+        warnings,
+    })
+}
+
+fn build_pairwise(data: &Data, judgments: &[Judgment], launch_id: i64) -> Option<Pairwise> {
+    let judgments: Vec<&Judgment> = judgments.iter().filter(|j| j.winner != "skip").collect();
+    if judgments.is_empty() {
+        return None;
+    }
+    let variants = &data.launch.variants;
+    let vidx: HashMap<i64, usize> = data.runs.iter().filter_map(|r| Some((r.id, variants.iter().position(|v| v.key == r.variant_key)?))).collect();
+    let mut rankings = vec![];
+    for source in ["judge", "human", "all"] {
+        let js: Vec<&&Judgment> = judgments.iter().filter(|j| source == "all" || j.source == source).collect();
+        if js.is_empty() || (source == "all" && rankings.len() < 2) {
+            continue;
+        }
+        let mut bouts = vec![];
+        let mut pair_scores: BTreeMap<(usize, usize), (Vec<f64>, f64)> = BTreeMap::new();
+        for j in &js {
+            let (Some(&ia), Some(&ib)) = (vidx.get(&j.run_a), vidx.get(&j.run_b)) else { continue };
+            if ia == ib {
+                continue;
+            }
+            // Orient every vote so `lo` is the earlier variant.
+            let (lo, hi, lo_is_a) = if ia < ib { (ia, ib, true) } else { (ib, ia, false) };
+            let entry = pair_scores.entry((lo, hi)).or_default();
+            let score_lo = match (j.winner.as_str(), lo_is_a) {
+                ("a", true) | ("b", false) => 1.0,
+                ("b", true) | ("a", false) => 0.0,
+                ("both_bad", _) => {
+                    entry.1 += 1.0;
+                    continue;
+                }
+                _ => 0.5,
+            };
+            entry.0.push(1.0 - score_lo);
+            bouts.push(Bout { i: lo, j: hi, score_i: score_lo });
+        }
+        let strengths = stats::bradley_terry_ci(variants.len(), &bouts, hash_u64(&format!("{launch_id}|bt|{source}")));
+        let pairs = pair_scores
+            .into_iter()
+            .map(|((lo, hi), (hi_scores, both_bad))| PairCount {
+                a: variants[lo].label.clone(),
+                b: variants[hi].label.clone(),
+                a_wins: hi_scores.iter().filter(|s| **s == 0.0).count() as f64,
+                b_wins: hi_scores.iter().filter(|s| **s == 1.0).count() as f64,
+                ties: hi_scores.iter().filter(|s| **s == 0.5).count() as f64,
+                both_bad,
+                b_rate: stats::win_rate(&hi_scores, hash_u64(&format!("{launch_id}|wr|{source}|{lo}|{hi}"))),
+            })
+            .collect();
+        rankings.push(Ranking { source: source.into(), votes: bouts.len(), strengths, pairs });
+    }
+
+    let judge: Vec<&&Judgment> = judgments.iter().filter(|j| j.source == "judge" && j.consistent.is_some()).collect();
+    let position_bias = (!judge.is_empty()).then(|| {
+        let inconsistent = judge.iter().filter(|j| j.consistent == Some(false)).count();
+        let picks: Vec<&str> = judge.iter().flat_map(|j| [j.detail["first_pick"].as_str().unwrap_or("tie"), j.detail["second_pick"].as_str().unwrap_or("tie")]).filter(|p| *p != "tie").collect();
+        let first = picks.iter().filter(|p| **p == "A").count();
+        PositionBias {
+            pairs: judge.len(),
+            inconsistent,
+            inconsistent_rate: inconsistent as f64 / judge.len() as f64,
+            first_position_rate: if picks.is_empty() { 0.5 } else { first as f64 / picks.len() as f64 },
+            decided_picks: picks.len(),
+        }
+    });
+
+    // Agreement between human and judge on the same run pair, in either orientation.
+    let norm = |j: &Judgment| -> ((i64, i64), &str) {
+        if j.run_a <= j.run_b {
+            ((j.run_a, j.run_b), match j.winner.as_str() { "a" => "lo", "b" => "hi", _ => "tie" })
+        } else {
+            ((j.run_b, j.run_a), match j.winner.as_str() { "a" => "hi", "b" => "lo", _ => "tie" })
+        }
+    };
+    let judge_votes: HashMap<(i64, i64), &str> = judgments.iter().filter(|j| j.source == "judge").map(|j| norm(j)).collect();
+    let (mut overlap, mut agree) = (0usize, 0usize);
+    for j in judgments.iter().filter(|j| j.source == "human") {
+        let (k, v) = norm(j);
+        if let Some(jv) = judge_votes.get(&k) {
+            overlap += 1;
+            if *jv == v {
+                agree += 1;
+            }
+        }
+    }
+    Some(Pairwise {
+        variants: variants.iter().map(|v| v.label.clone()).collect(),
+        rankings,
+        position_bias,
+        human_judge_agreement: (overlap > 0).then(|| agree as f64 / overlap as f64),
+        human_judge_overlap: overlap,
+    })
+}
+
+fn build_ablation(data: &Data, meta: &AblationMeta, metric: &str) -> AblationReport {
+    let exp = &data.launch.def;
+    let label = |value: &str| level_label_for_value(exp, &meta.factor, value).unwrap_or_else(|| value.to_string());
+    let (none, full) = (label(&meta.baseline), label(&meta.full));
+    let eff = |m: &str, base: &str, treat: &str| data.level_effect(m, &meta.factor, base, treat);
+    let desc = meta.description_only.as_ref().map(|d| label(d));
+    let invoked = data.values("skill_invoked", &|r| data.variant(&r.variant_key).and_then(|v| v.level_label(&meta.factor)) == Some(full.as_str()));
+    let sections = meta
+        .sections
+        .iter()
+        .map(|s| {
+            let without = label(&s.overlay);
+            let effect = eff(metric, &without, &full);
+            let attribution = match effect.as_ref().map(|e| e.verdict) {
+                None => "no_data",
+                Some(Verdict::Better) | Some(Verdict::Higher) => "carries",
+                Some(Verdict::Worse) | Some(Verdict::Lower) => "hurts",
+                Some(Verdict::Neutral) => "no_effect",
+                Some(Verdict::Inconclusive) => "inconclusive",
+            };
+            SectionAttribution {
+                index: s.index,
+                title: s.title.clone(),
+                overlay_label: without.clone(),
+                est_tokens: s.est_tokens,
+                lines: s.lines,
+                effect,
+                attribution: attribution.into(),
+                cost_effect: eff("cost_usd", &without, &full),
+                tokens_effect: eff("total_tokens", &without, &full),
+            }
+        })
+        .collect();
+    AblationReport {
+        source: meta.source.clone(),
+        kind: meta.kind.clone(),
+        metric: metric.to_string(),
+        full_effect: eff(metric, &none, &full),
+        description_only_effect: desc.as_ref().and_then(|d| eff(metric, &none, d)),
+        body_effect: desc.as_ref().and_then(|d| eff(metric, d, &full)),
+        skill_invoked_rate: (!invoked.is_empty()).then(|| stats::mean(&invoked)),
+        sections,
+    }
+}
+
+// ------------------------------------------------------------- text output
+
+pub fn fmt_value(info: &MetricInfo, v: f64) -> String {
+    match (info.unit.as_str(), info.scale) {
+        ("$", _) => format!("${v:.4}"),
+        (_, stats::Scale::Rate) => format!("{:.0}%", v * 100.0),
+        (_, stats::Scale::Score10) => format!("{v:.2}"),
+        ("tok", _) => format!("{:.1}k", v / 1000.0),
+        ("s", _) => format!("{v:.1}s"),
+        _ => format!("{v:.1}"),
+    }
+}
+
+pub fn fmt_delta(info: &MetricInfo, v: f64) -> String {
+    let sign = if v >= 0.0 { "+" } else { "−" };
+    let a = v.abs();
+    let body = match (info.unit.as_str(), info.scale) {
+        ("$", _) => format!("${a:.4}"),
+        (_, stats::Scale::Rate) => format!("{:.0}pp", a * 100.0),
+        (_, stats::Scale::Score10) => format!("{a:.2}"),
+        ("tok", _) => format!("{:.1}k", a / 1000.0),
+        ("s", _) => format!("{a:.1}s"),
+        _ => format!("{a:.1}"),
+    };
+    format!("{sign}{body}")
+}
+
+pub fn fmt_effect(info: &MetricInfo, e: &Effect) -> String {
+    format!("{} [{}, {}] {}", fmt_delta(info, e.effect), fmt_delta(info, e.ci_low), fmt_delta(info, e.ci_high), e.verdict.as_str())
+}
+
+fn table(rows: &[Vec<String>]) -> String {
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..cols).map(|c| rows.iter().filter_map(|r| r.get(c)).map(|s| s.chars().count()).max().unwrap_or(0)).collect();
+    let mut out = String::new();
+    for r in rows {
+        let line: Vec<String> = r.iter().enumerate().map(|(i, s)| format!("{s}{}", " ".repeat(widths[i] - s.chars().count()))).collect();
+        out.push_str(line.join("  ").trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+pub fn render_text(r: &Report) -> String {
+    let mut s = String::new();
+    let info = |m: &str| stats::metric_info(m);
+    s.push_str(&format!("{}  launch #{}  {}{}\n", r.experiment, r.launch_id, r.status, if r.phase.is_empty() { String::new() } else { format!(" ({})", r.phase) }));
+    if !r.description.is_empty() {
+        s.push_str(&format!("{}\n", r.description));
+    }
+    s.push_str(&format!(
+        "runs: {}/{} done, {} failed, {} timeout, {} pending · agent cost ${:.4} · judge cost ${:.4} · primary metric: {}\n",
+        r.counts.done, r.counts.total, r.counts.failed, r.counts.timeout, r.counts.pending + r.counts.running, r.cost_usd, r.judge_cost_usd, r.primary_metric
+    ));
+    for w in &r.warnings {
+        s.push_str(&format!("warning: {w}\n"));
+    }
+
+    let shown: Vec<&MetricInfo> = r.metrics.iter().filter(|m| ["pass", "judge_score", "expectations_passed", "skill_invoked", "cost_usd", "wall_time_s", "total_tokens", "turns"].contains(&m.name.as_str()) || m.name == r.primary_metric).collect();
+    s.push_str("\nVARIANTS (mean ± sd)\n");
+    let mut rows = vec![std::iter::once("variant".to_string()).chain(std::iter::once("n".into())).chain(shown.iter().map(|m| m.label.clone())).collect::<Vec<_>>()];
+    for v in &r.variants {
+        let mut row = vec![v.label.clone(), v.counts.done.to_string()];
+        for m in &shown {
+            row.push(v.metrics.get(&m.name).map(|x| format!("{} ±{}", fmt_value(m, x.mean), fmt_value(m, x.sd).trim_start_matches('$'))).unwrap_or_else(|| "–".into()));
+        }
+        rows.push(row);
+    }
+    s.push_str(&table(&rows));
+
+    let key_metrics: Vec<String> = [r.primary_metric.as_str(), "pass", "cost_usd", "wall_time_s"].iter().filter(|m| r.metrics.iter().any(|x| x.name == **m)).map(|m| m.to_string()).collect::<BTreeSet<_>>().into_iter().collect();
+    for f in &r.factors {
+        let cs: Vec<&Comparison> = r.comparisons.iter().filter(|c| c.kind == "factor" && c.factor.as_deref() == Some(&f.name) && key_metrics.contains(&c.metric)).collect();
+        if cs.is_empty() {
+            continue;
+        }
+        s.push_str(&format!("\nFACTOR {} (vs {}; effect [95% CI], paired by task)\n", f.name, f.levels[0]));
+        let mut rows = vec![vec!["level".into(), "metric".into(), "effect".into(), "relative".into(), "units".into()]];
+        for c in cs {
+            let i = info(&c.metric);
+            rows.push(vec![c.level.clone(), i.label.clone(), fmt_effect(&i, &c.effect), c.effect.rel.map(|x| format!("{:+.0}%", x * 100.0)).unwrap_or_default(), c.effect.units.to_string()]);
+        }
+        s.push_str(&table(&rows));
+    }
+
+    let pm = info(&r.primary_metric);
+    if r.tasks.len() > 1 || r.variants.len() > 1 {
+        s.push_str(&format!("\nPER TASK ({}; * = flaky)\n", pm.label));
+        let mut rows = vec![std::iter::once("task".to_string()).chain(r.variants.iter().map(|v| v.label.clone())).collect::<Vec<_>>()];
+        for t in &r.tasks {
+            let mut row = vec![t.task_id.clone()];
+            for c in &t.cells {
+                let star = if c.flaky.is_empty() { "" } else { "*" };
+                row.push(c.metrics.get(&r.primary_metric).map(|x| format!("{}{star} (n={})", fmt_value(&pm, x.mean), x.n)).unwrap_or_else(|| "–".into()));
+            }
+            rows.push(row);
+        }
+        s.push_str(&table(&rows));
+    }
+    if !r.flaky.is_empty() {
+        s.push_str("\nFLAKY CELLS\n");
+        for f in &r.flaky {
+            let i = info(&f.metric);
+            s.push_str(&format!("  {} · {} · {}: mean {} sd {} (n={})\n", f.task_id, f.variant, i.label, fmt_value(&i, f.mean), fmt_value(&i, f.sd), f.n));
+        }
+    }
+
+    if let Some(p) = &r.pairwise {
+        for rk in &p.rankings {
+            s.push_str(&format!("\nPAIRWISE ({}; {} votes)\n", rk.source, rk.votes));
+            if p.variants.len() > 2 {
+                let mut order: Vec<usize> = (0..p.variants.len()).collect();
+                order.sort_by(|a, b| rk.strengths[*b].strength.total_cmp(&rk.strengths[*a].strength));
+                let mut rows = vec![vec!["variant".into(), "BT strength".into(), "95% CI".into(), "W".into(), "L".into(), "T".into()]];
+                for i in order {
+                    let x = &rk.strengths[i];
+                    rows.push(vec![p.variants[i].clone(), format!("{:.3}", x.strength), format!("[{:.3}, {:.3}]", x.ci_low, x.ci_high), x.wins.to_string(), x.losses.to_string(), x.ties.to_string()]);
+                }
+                s.push_str(&table(&rows));
+            }
+            for pc in &rk.pairs {
+                let rate = pc.b_rate.as_ref().map(|x| format!("{:.0}% [{:.0}%, {:.0}%]", x.mean * 100.0, x.ci_low * 100.0, x.ci_high * 100.0)).unwrap_or_default();
+                s.push_str(&format!("  {} vs {}: {}–{} ({} ties, {} both bad) · preference for {}: {}\n", pc.a, pc.b, pc.a_wins, pc.b_wins, pc.ties, pc.both_bad, pc.b, rate));
+            }
+        }
+        if let Some(pb) = &p.position_bias {
+            s.push_str(&format!(
+                "  position bias: {}/{} pairs inconsistent across orders ({:.0}%); first-listed result picked {:.0}% of {} decided picks (50% = unbiased)\n",
+                pb.inconsistent, pb.pairs, pb.inconsistent_rate * 100.0, pb.first_position_rate * 100.0, pb.decided_picks
+            ));
+        }
+        if let Some(a) = p.human_judge_agreement {
+            s.push_str(&format!("  human–judge agreement: {:.0}% over {} shared pairs\n", a * 100.0, p.human_judge_overlap));
+        }
+    }
+
+    if let Some(a) = &r.ablation {
+        s.push_str(&render_ablation_text(a));
+    }
+    s
+}
+
+pub fn render_ablation_text(a: &AblationReport) -> String {
+    let i = stats::metric_info(&a.metric);
+    let mut s = format!("\nABLATION of {} ({})\n", a.source, i.label);
+    let e = |x: &Option<Effect>| x.as_ref().map(|e| fmt_effect(&i, e)).unwrap_or_else(|| "no data".into());
+    s.push_str(&format!("  full vs none: {}\n", e(&a.full_effect)));
+    if a.description_only_effect.is_some() {
+        s.push_str(&format!("  description-only vs none: {}\n", e(&a.description_only_effect)));
+        s.push_str(&format!("  full vs description-only: {}\n", e(&a.body_effect)));
+    }
+    if let Some(rate) = a.skill_invoked_rate {
+        s.push_str(&format!("  skill invoked in {:.0}% of full-skill runs\n", rate * 100.0));
+    }
+    let mut rows = vec![vec!["#".into(), "section".into(), "~tokens".into(), "contribution (full − without) [95% CI]".into(), "attribution".into()]];
+    for sec in &a.sections {
+        rows.push(vec![(sec.index + 1).to_string(), sec.title.clone(), sec.est_tokens.to_string(), sec.effect.as_ref().map(|e| format!("{} [{}, {}]", fmt_delta(&i, e.effect), fmt_delta(&i, e.ci_low), fmt_delta(&i, e.ci_high))).unwrap_or_else(|| "–".into()), sec.attribution.replace('_', " ")]);
+    }
+    s.push_str(&table(&rows));
+    s
+}

@@ -1,0 +1,449 @@
+//! Statistics: summaries, paired effects with bootstrapped confidence
+//! intervals, Bradley–Terry aggregation of pairwise votes, and flakiness.
+//!
+//! All resampling is seeded, so the same data always yields the same report.
+
+use crate::util::Rng;
+use serde::{Deserialize, Serialize};
+
+pub const BOOTSTRAP_ITERS: usize = 2000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Higher,
+    Lower,
+    /// Neither direction is better in itself (turns, words, tool calls).
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scale {
+    /// 0..1 rates such as pass.
+    Rate,
+    /// 1..10 judge scores.
+    Score10,
+    /// Non-negative magnitudes: cost, time, tokens, counts.
+    Positive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricInfo {
+    pub name: String,
+    pub label: String,
+    pub direction: Direction,
+    pub scale: Scale,
+    pub unit: String,
+}
+
+pub fn metric_info(name: &str) -> MetricInfo {
+    use Direction::*;
+    use Scale::*;
+    let (label, direction, scale, unit) = match name {
+        "pass" => ("Pass rate", Higher, Rate, ""),
+        "checks_passed" => ("Checks passed", Higher, Rate, ""),
+        "expectations_passed" => ("Expectations met", Higher, Rate, ""),
+        "judge_score" => ("Judge score", Higher, Score10, "/10"),
+        "skill_invoked" => ("Skill invoked", Higher, Rate, ""),
+        "cache_hit" => ("Cache hit", Higher, Rate, ""),
+        "cost_usd" => ("Cost", Lower, Positive, "$"),
+        "judge_cost_usd" => ("Judge cost", Lower, Positive, "$"),
+        "wall_time_s" => ("Wall time", Lower, Positive, "s"),
+        "total_tokens" => ("Total tokens", Lower, Positive, "tok"),
+        "input_tokens" => ("Input tokens", Lower, Positive, "tok"),
+        "output_tokens" => ("Output tokens", Lower, Positive, "tok"),
+        "thinking_tokens" => ("Thinking tokens", Lower, Positive, "tok"),
+        "cache_read_tokens" => ("Cache read tokens", None, Positive, "tok"),
+        "cache_creation_tokens" => ("Cache write tokens", None, Positive, "tok"),
+        "turns" => ("Turns", None, Positive, ""),
+        "tool_calls" => ("Tool calls", None, Positive, ""),
+        "diff_lines" => ("Diff size", None, Positive, "lines"),
+        "files_touched" => ("Files touched", None, Positive, ""),
+        "output_words" => ("Output words", None, Positive, "words"),
+        "retries" => ("Rate-limit retries", Lower, Positive, ""),
+        "permission_denials" => ("Permission denials", Lower, Positive, ""),
+        _ => ("", None, Positive, ""),
+    };
+    let label = if label.is_empty() { name.to_string() } else { label.to_string() };
+    MetricInfo { name: name.to_string(), label, direction, scale, unit: unit.to_string() }
+}
+
+/// Metrics shown by default in reports, in display order.
+pub const HEADLINE: &[&str] = &["pass", "judge_score", "expectations_passed", "checks_passed", "skill_invoked", "cost_usd", "wall_time_s", "total_tokens", "output_tokens", "turns", "tool_calls", "output_words", "diff_lines"];
+
+pub fn mean(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    xs.iter().sum::<f64>() / xs.len() as f64
+}
+
+pub fn sd(xs: &[f64]) -> f64 {
+    if xs.len() < 2 {
+        return 0.0;
+    }
+    let m = mean(xs);
+    (xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64).sqrt()
+}
+
+pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let pos = p * (sorted.len() - 1) as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+}
+
+fn resample_mean(xs: &[f64], rng: &mut Rng) -> f64 {
+    let n = xs.len();
+    (0..n).map(|_| xs[rng.below(n)]).sum::<f64>() / n as f64
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Summary {
+    pub n: usize,
+    pub mean: f64,
+    pub sd: f64,
+    pub min: f64,
+    pub max: f64,
+    /// Bootstrapped 95% CI of the mean.
+    pub ci_low: f64,
+    pub ci_high: f64,
+}
+
+pub fn summarize(xs: &[f64], seed: u64) -> Option<Summary> {
+    if xs.is_empty() {
+        return None;
+    }
+    let m = mean(xs);
+    let (mut lo, mut hi) = (m, m);
+    if xs.len() > 1 {
+        let mut rng = Rng::new(seed);
+        let mut boots: Vec<f64> = (0..BOOTSTRAP_ITERS).map(|_| resample_mean(xs, &mut rng)).collect();
+        boots.sort_by(|a, b| a.total_cmp(b));
+        lo = percentile(&boots, 0.025);
+        hi = percentile(&boots, 0.975);
+    }
+    Some(Summary {
+        n: xs.len(),
+        mean: m,
+        sd: sd(xs),
+        min: xs.iter().cloned().fold(f64::INFINITY, f64::min),
+        max: xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        ci_low: lo,
+        ci_high: hi,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    /// The CI excludes zero and the change is in the metric's good direction.
+    Better,
+    Worse,
+    /// The CI excludes zero on a metric with no good direction.
+    Higher,
+    Lower,
+    /// The CI spans zero and is tight enough to rule out a meaningful effect.
+    Neutral,
+    /// The CI spans zero and is too wide to say.
+    Inconclusive,
+}
+
+impl Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verdict::Better => "better",
+            Verdict::Worse => "worse",
+            Verdict::Higher => "higher",
+            Verdict::Lower => "lower",
+            Verdict::Neutral => "neutral",
+            Verdict::Inconclusive => "inconclusive",
+        }
+    }
+    pub fn is_conclusive_change(&self) -> bool {
+        matches!(self, Verdict::Better | Verdict::Worse | Verdict::Higher | Verdict::Lower)
+    }
+}
+
+/// A paired comparison of treatment B against control A.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Effect {
+    /// Mean over pairing units of (mean B − mean A).
+    pub effect: f64,
+    pub ci_low: f64,
+    pub ci_high: f64,
+    /// Effect relative to the control mean, when that is non-zero.
+    pub rel: Option<f64>,
+    pub base_mean: f64,
+    pub treat_mean: f64,
+    /// Pairing units (tasks, or task × other factor levels) with data on both sides.
+    pub units: usize,
+    pub n_a: usize,
+    pub n_b: usize,
+    pub verdict: Verdict,
+}
+
+/// Width of the "no meaningful effect" band around zero.
+pub fn equivalence_band(scale: Scale, base_mean: f64) -> f64 {
+    match scale {
+        Scale::Rate => 0.1,
+        Scale::Score10 => 0.5,
+        Scale::Positive => (0.1 * base_mean.abs()).max(1e-9),
+    }
+}
+
+/// Paired effect with a hierarchical bootstrap: resample pairing units, then
+/// resample runs within each side of each unit. Units missing either side
+/// are dropped.
+pub fn paired_effect(units: &[(Vec<f64>, Vec<f64>)], info: &MetricInfo, seed: u64) -> Option<Effect> {
+    let units: Vec<&(Vec<f64>, Vec<f64>)> = units.iter().filter(|(a, b)| !a.is_empty() && !b.is_empty()).collect();
+    if units.is_empty() {
+        return None;
+    }
+    let deltas: Vec<f64> = units.iter().map(|(a, b)| mean(b) - mean(a)).collect();
+    let effect = mean(&deltas);
+    let base_mean = mean(&units.iter().map(|(a, _)| mean(a)).collect::<Vec<_>>());
+    let treat_mean = mean(&units.iter().map(|(_, b)| mean(b)).collect::<Vec<_>>());
+    let n_a: usize = units.iter().map(|(a, _)| a.len()).sum();
+    let n_b: usize = units.iter().map(|(_, b)| b.len()).sum();
+    let mut rng = Rng::new(seed);
+    let k = units.len();
+    let mut boots = Vec::with_capacity(BOOTSTRAP_ITERS);
+    for _ in 0..BOOTSTRAP_ITERS {
+        let mut total = 0.0;
+        for _ in 0..k {
+            let (a, b) = units[if k > 1 { rng.below(k) } else { 0 }];
+            total += resample_mean(b, &mut rng) - resample_mean(a, &mut rng);
+        }
+        boots.push(total / k as f64);
+    }
+    boots.sort_by(|a, b| a.total_cmp(b));
+    let (ci_low, ci_high) = (percentile(&boots, 0.025), percentile(&boots, 0.975));
+    // One run per side gives a zero-width interval that proves nothing.
+    let degenerate = n_a <= k && n_b <= k && k == 1;
+    let band = equivalence_band(info.scale, base_mean);
+    let verdict = if degenerate {
+        Verdict::Inconclusive
+    } else if ci_low > 0.0 || ci_high < 0.0 {
+        let up = ci_low > 0.0;
+        match info.direction {
+            Direction::Higher => if up { Verdict::Better } else { Verdict::Worse },
+            Direction::Lower => if up { Verdict::Worse } else { Verdict::Better },
+            Direction::None => if up { Verdict::Higher } else { Verdict::Lower },
+        }
+    } else if ci_low >= -band && ci_high <= band {
+        Verdict::Neutral
+    } else {
+        Verdict::Inconclusive
+    };
+    Some(Effect {
+        effect,
+        ci_low,
+        ci_high,
+        rel: (base_mean.abs() > 1e-12).then(|| effect / base_mean),
+        base_mean,
+        treat_mean,
+        units: k,
+        n_a,
+        n_b,
+        verdict,
+    })
+}
+
+/// Is this cell's spread large enough to call the task flaky on this metric?
+pub fn is_flaky(xs: &[f64], scale: Scale) -> bool {
+    if xs.len() < 3 {
+        return false;
+    }
+    let m = mean(xs);
+    match scale {
+        Scale::Rate => (0.2..=0.8).contains(&m) && xs.iter().all(|x| *x == 0.0 || *x == 1.0),
+        Scale::Score10 => sd(xs) >= 1.5,
+        Scale::Positive => m.abs() > 1e-12 && sd(xs) / m.abs() >= 0.6,
+    }
+}
+
+// ---------------------------------------------------------- Bradley–Terry
+
+/// One pairwise outcome between items `i` and `j`: `score_i` is 1 for a win
+/// by `i`, 0 for a loss, 0.5 for a tie.
+#[derive(Debug, Clone, Copy)]
+pub struct Bout {
+    pub i: usize,
+    pub j: usize,
+    pub score_i: f64,
+}
+
+/// Bradley–Terry strengths by the MM algorithm, normalized to sum to 1.
+/// A small symmetric prior keeps unbeaten or winless items finite.
+pub fn bradley_terry(n: usize, bouts: &[Bout]) -> Vec<f64> {
+    if n == 0 {
+        return vec![];
+    }
+    const PRIOR: f64 = 0.25;
+    let mut wins = vec![0.0; n];
+    let mut games = vec![vec![0.0; n]; n];
+    for b in bouts {
+        if b.i == b.j || b.i >= n || b.j >= n {
+            continue;
+        }
+        wins[b.i] += b.score_i;
+        wins[b.j] += 1.0 - b.score_i;
+        games[b.i][b.j] += 1.0;
+        games[b.j][b.i] += 1.0;
+    }
+    for i in 0..n {
+        for j in 0..n {
+            if i != j && games[i][j] > 0.0 {
+                wins[i] += PRIOR / 2.0;
+                games[i][j] += PRIOR / 2.0;
+            }
+        }
+    }
+    let mut p = vec![1.0 / n as f64; n];
+    for _ in 0..500 {
+        let mut next = vec![0.0; n];
+        for i in 0..n {
+            let denom: f64 = (0..n).filter(|&j| j != i && games[i][j] > 0.0).map(|j| games[i][j] / (p[i] + p[j])).sum();
+            next[i] = if denom > 0.0 { wins[i] / denom } else { p[i] };
+        }
+        let total: f64 = next.iter().sum();
+        if total <= 0.0 {
+            break;
+        }
+        next.iter_mut().for_each(|x| *x /= total);
+        let delta: f64 = next.iter().zip(&p).map(|(a, b)| (a - b).abs()).sum();
+        p = next;
+        if delta < 1e-10 {
+            break;
+        }
+    }
+    p
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BtItem {
+    pub strength: f64,
+    pub ci_low: f64,
+    pub ci_high: f64,
+    pub wins: f64,
+    pub losses: f64,
+    pub ties: f64,
+}
+
+/// Strengths with bootstrapped CIs (resampling bouts).
+pub fn bradley_terry_ci(n: usize, bouts: &[Bout], seed: u64) -> Vec<BtItem> {
+    let point = bradley_terry(n, bouts);
+    let mut samples: Vec<Vec<f64>> = vec![Vec::new(); n];
+    if !bouts.is_empty() {
+        let mut rng = Rng::new(seed);
+        for _ in 0..400 {
+            let re: Vec<Bout> = (0..bouts.len()).map(|_| bouts[rng.below(bouts.len())]).collect();
+            for (i, s) in bradley_terry(n, &re).into_iter().enumerate() {
+                samples[i].push(s);
+            }
+        }
+    }
+    (0..n)
+        .map(|i| {
+            samples[i].sort_by(|a, b| a.total_cmp(b));
+            let (lo, hi) = if samples[i].is_empty() { (point[i], point[i]) } else { (percentile(&samples[i], 0.025), percentile(&samples[i], 0.975)) };
+            let mut item = BtItem { strength: point[i], ci_low: lo, ci_high: hi, wins: 0.0, losses: 0.0, ties: 0.0 };
+            for b in bouts.iter().filter(|b| b.i == i || b.j == i) {
+                let s = if b.i == i { b.score_i } else { 1.0 - b.score_i };
+                if s > 0.5 {
+                    item.wins += 1.0
+                } else if s < 0.5 {
+                    item.losses += 1.0
+                } else {
+                    item.ties += 1.0
+                }
+            }
+            item
+        })
+        .collect()
+}
+
+/// Win rate of B over A with a bootstrapped CI; ties count half.
+pub fn win_rate(scores_b: &[f64], seed: u64) -> Option<Summary> {
+    summarize(scores_b, seed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noisy(center: f64, n: usize, seed: u64) -> Vec<f64> {
+        let mut r = Rng::new(seed);
+        (0..n).map(|_| center + r.normal() * 0.5).collect()
+    }
+
+    #[test]
+    fn detects_real_effect_and_null() {
+        let info = metric_info("judge_score");
+        let real: Vec<_> = (0..6).map(|t| (noisy(5.0 + t as f64 * 0.2, 5, t), noisy(7.0 + t as f64 * 0.2, 5, 100 + t))).collect();
+        let e = paired_effect(&real, &info, 1).unwrap();
+        assert!((e.effect - 2.0).abs() < 0.5, "{e:?}");
+        assert!(e.ci_low > 0.0 && e.verdict == Verdict::Better);
+        assert!(e.ci_low < e.effect && e.effect < e.ci_high);
+
+        let null: Vec<_> = (0..8).map(|t| (noisy(6.0, 8, t), noisy(6.0, 8, 200 + t))).collect();
+        let e = paired_effect(&null, &info, 1).unwrap();
+        assert!(e.ci_low < 0.0 && e.ci_high > 0.0);
+        assert_eq!(e.verdict, Verdict::Neutral, "{e:?}");
+
+        let thin = vec![(vec![3.0, 9.0], vec![8.0, 2.0])];
+        assert_eq!(paired_effect(&thin, &info, 1).unwrap().verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn direction_decides_better_or_worse() {
+        let units: Vec<_> = (0..5).map(|t| (noisy(1.0, 5, t), noisy(3.0, 5, 50 + t))).collect();
+        assert_eq!(paired_effect(&units, &metric_info("cost_usd"), 1).unwrap().verdict, Verdict::Worse);
+        assert_eq!(paired_effect(&units, &metric_info("turns"), 1).unwrap().verdict, Verdict::Higher);
+        assert!(paired_effect(&[(vec![], vec![1.0])], &metric_info("pass"), 1).is_none());
+        // One run a side is never conclusive.
+        assert_eq!(paired_effect(&[(vec![1.0], vec![9.0])], &metric_info("judge_score"), 1).unwrap().verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn bootstrap_is_reproducible() {
+        let units: Vec<_> = (0..4).map(|t| (noisy(5.0, 5, t), noisy(5.5, 5, 9 + t))).collect();
+        let a = paired_effect(&units, &metric_info("judge_score"), 42).unwrap();
+        let b = paired_effect(&units, &metric_info("judge_score"), 42).unwrap();
+        assert_eq!((a.ci_low, a.ci_high), (b.ci_low, b.ci_high));
+    }
+
+    #[test]
+    fn bradley_terry_recovers_order() {
+        // True strengths 4 : 2 : 1.
+        let truth = [4.0, 2.0, 1.0];
+        let mut rng = Rng::new(3);
+        let mut bouts = vec![];
+        for _ in 0..300 {
+            for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+                let p = truth[i] / (truth[i] + truth[j]);
+                bouts.push(Bout { i, j, score_i: if rng.f64() < p { 1.0 } else { 0.0 } });
+            }
+        }
+        let s = bradley_terry(3, &bouts);
+        assert!(s[0] > s[1] && s[1] > s[2]);
+        assert!((s[0] / s[2] - 4.0).abs() < 1.0, "{s:?}");
+        let ci = bradley_terry_ci(3, &bouts, 1);
+        assert!(ci[0].ci_low > ci[2].ci_high);
+        // An unbeaten item stays finite.
+        let sweep = bradley_terry(2, &[Bout { i: 0, j: 1, score_i: 1.0 }; 5]);
+        assert!(sweep[0] > 0.9 && sweep[0] < 1.0);
+    }
+
+    #[test]
+    fn flakiness() {
+        assert!(is_flaky(&[1.0, 0.0, 1.0, 0.0, 1.0], Scale::Rate));
+        assert!(!is_flaky(&[1.0, 1.0, 1.0, 1.0, 1.0], Scale::Rate));
+        assert!(is_flaky(&[2.0, 8.0, 5.0, 9.0], Scale::Score10));
+        assert!(!is_flaky(&[7.0, 8.0, 7.0, 8.0], Scale::Score10));
+    }
+}
