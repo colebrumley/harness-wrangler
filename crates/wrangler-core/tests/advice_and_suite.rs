@@ -26,6 +26,14 @@ fn review_queue_votes_annotations_and_advice() {
     assert!(!as_json.contains("overlay=") && !as_json.contains("plain") && !as_json.contains("noisy"), "review item leaks the variant");
     assert!(item.left.output.contains("QUALITY=") && item.progress.total_remaining > 0);
     let before = item.progress.total_remaining;
+    // With two factors, the first pair served isolates the pattern: same effort, with and without an overlay.
+    {
+        let key = |id: i64| store.run(id).unwrap().variant_key;
+        let (l, r) = (key(item.left.run_id), key(item.right.run_id));
+        let part = |k: &str, i: usize| k.split('|').nth(i).unwrap().to_string();
+        assert_eq!(part(&l, 1), part(&r, 1), "effort should match: {l} vs {r}");
+        assert_ne!(part(&l, 0), part(&r, 0), "overlay should differ: {l} vs {r}");
+    }
 
     let reveal = review::vote(&store, launch, item.left.run_id, item.right.run_id, "left", "tighter").unwrap();
     assert_ne!(reveal.left_variant, reveal.right_variant);

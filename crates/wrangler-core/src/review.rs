@@ -4,6 +4,7 @@
 //! comparison, so the reviewer sees fewer items. Variant identity is never
 //! in a queue item; it is revealed only by the vote response.
 
+use crate::model::FactorKind;
 use crate::scheduler::shown_for;
 use crate::store::{Annotation, Judgment, Launch, RunRow, Store};
 use crate::util::hash_u64;
@@ -136,7 +137,17 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
                     let u = uncertainty(wi, wj);
                     let seen = task_votes.get(&(t.id.clone(), i, j)).copied().unwrap_or(0.0);
                     let inconsistent = judge_inconsistent.contains_key(&pair_key(ra.id, rb.id));
-                    let priority = u * (1.0 / (1.0 + seen)) * if inconsistent { 1.5 } else { 1.0 };
+                    // Prefer clean comparisons: two variants that differ in one
+                    // factor, and most of all in the pattern under test (same
+                    // model, with and without the skill). A pair that differs
+                    // in several factors says little about any one of them.
+                    let differing: Vec<FactorKind> = variants[i].levels.iter().zip(&variants[j].levels).filter(|(a, b)| a.1.label != b.1.label).map(|(a, _)| a.1.kind).collect();
+                    let focus = match differing.as_slice() {
+                        [FactorKind::Overlay] | [FactorKind::SystemPromptAppend] => 2.0,
+                        [_] => 1.0,
+                        _ => 0.25,
+                    };
+                    let priority = u * focus * (1.0 / (1.0 + seen)) * if inconsistent { 1.5 } else { 1.0 };
                     let mut why = vec![];
                     if u > 0.15 {
                         why.push("undecided_comparison".to_string());

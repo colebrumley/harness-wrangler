@@ -138,9 +138,18 @@ function Detail({ name, ctx, onChanged }: { name: string; ctx: Ctx; onChanged: (
             </div>
             <div>
               <h3 style={{ marginBottom: 6 }}>Tasks</h3>
-              <div className="row wrap" style={{ gap: 6 }}>
-                {(d.tasks ?? []).map((t: any) => <span key={t.id} className="tag" title={t.prompt}>{t.id}</span>)}
-              </div>
+              <table className="grid">
+                <thead><tr><th>Task</th><th>What the agent is asked</th><th>What gets judged</th></tr></thead>
+                <tbody>
+                  {(d.tasks ?? []).map((t: any) => (
+                    <tr key={t.id}>
+                      <td style={{ whiteSpace: "nowrap" }}><b>{t.id}</b></td>
+                      <td>{t.prompt}{t.fixture?.dir && <div className="faint small">starts with the files in {t.fixture.dir}</div>}</td>
+                      <td style={{ whiteSpace: "nowrap" }}>{t.output_file ? <code>{t.output_file}</code> : <span className="muted">the final message</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
             <div className="row wrap" style={{ borderTop: "1px solid var(--rule)", paddingTop: 14 }}>
               <button className="btn primary" disabled={!!d.error} onClick={launch}>Run {d.total_runs ?? ""} runs</button>
