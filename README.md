@@ -48,6 +48,8 @@ cd examples && ../target/release/wrangler serve
 
 The app's File menu has Open Project, New Project, Open Recent and Close Project. The first time it reads a project under Documents or Desktop, macOS asks whether to allow access; choose Allow.
 
+For scripted checks of the app itself, `WRANGLER_PICK_FOLDER=<dir>` makes the folder buttons use that path instead of the system picker, and `WRANGLER_UI_SCRIPT="Switch project|Create project in a folder"` presses the named buttons in order and writes what each screen showed to `WRANGLER_UI_REPORT`.
+
 ## A real experiment
 
 `examples/experiments/rfw-writing.toml` asks whether `reader-first-writing` improves two writing tasks on Haiku, scored by a Sonnet judge. It makes 20 agent runs and about 30 judge calls.

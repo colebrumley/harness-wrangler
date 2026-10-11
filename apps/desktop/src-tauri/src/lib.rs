@@ -109,6 +109,27 @@ fn project_current(shell: State<Shell>) -> Option<String> {
     shell.api.lock().unwrap().as_ref().map(|a| a.project.root.to_string_lossy().to_string())
 }
 
+/// For scripted runs of the app: when WRANGLER_PICK_FOLDER is set, the
+/// folder buttons use that path instead of showing the system picker.
+#[tauri::command]
+fn pick_override() -> Option<String> {
+    std::env::var("WRANGLER_PICK_FOLDER").ok().filter(|p| !p.is_empty())
+}
+
+/// For scripted runs: WRANGLER_UI_SCRIPT holds button labels separated by
+/// `|`. The window presses them in order and reports what it showed after
+/// each through `ui_script_report`, which writes WRANGLER_UI_REPORT.
+#[tauri::command]
+fn ui_script() -> Vec<String> {
+    std::env::var("WRANGLER_UI_SCRIPT").map(|s| s.split('|').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn ui_script_report(report: Value) -> Result<(), String> {
+    let path = std::env::var("WRANGLER_UI_REPORT").map_err(|_| "WRANGLER_UI_REPORT is not set".to_string())?;
+    std::fs::write(path, serde_json::to_string_pretty(&report).unwrap_or_default()).map_err(|e| e.to_string())
+}
+
 /// Path of the project still being opened at startup, if any.
 #[tauri::command]
 fn project_pending(shell: State<Shell>) -> Option<String> {
@@ -227,7 +248,7 @@ pub fn run() {
                 let _ = app.emit("project-menu", id);
             }
         })
-        .invoke_handler(tauri::generate_handler![project_open, project_init, project_current, project_pending, project_close, recent_projects, api])
+        .invoke_handler(tauri::generate_handler![ui_script, ui_script_report, pick_override, project_open, project_init, project_current, project_pending, project_close, recent_projects, api])
         .run(tauri::generate_context!())
         .expect("error while running Harness Wrangler");
 }

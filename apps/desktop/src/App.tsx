@@ -103,8 +103,10 @@ export default function App() {
   // The launch in view: from the URL, else the most recent one.
   const routeLaunch = ["results", "review", "ablation", "advice"].includes(view) && parts[1] ? Number(parts[1]) : null;
   const [sticky, setSticky] = useState<number | null>(null);
+  useEffect(() => { setSticky(null); }, [projectKey]);
   useEffect(() => { if (routeLaunch) setSticky(routeLaunch); }, [routeLaunch]);
-  const launchId = routeLaunch ?? sticky ?? launches[0]?.id ?? null;
+  const known = (id: number | null) => (id !== null && launches.some((l) => l.id === id) ? id : null);
+  const launchId = known(routeLaunch) ?? known(sticky) ?? launches[0]?.id ?? null;
   const current = launches.find((l) => l.id === launchId);
 
   const ctx: Ctx = useMemo(() => ({
@@ -114,7 +116,8 @@ export default function App() {
 
   const [reviewLeft, setReviewLeft] = useState<number | null>(null);
   useEffect(() => {
-    if (!launchId || !ready) return;
+    // No launch (a new or just-switched project) means nothing to review.
+    if (!launchId || !ready) { setReviewLeft(null); return; }
     let live = true;
     call("review_next", { launch_id: launchId }).then((r) => { if (live) setReviewLeft(r.progress?.useful_remaining ?? null); }).catch(() => setReviewLeft(null));
     return () => { live = false; };

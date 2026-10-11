@@ -21,6 +21,9 @@ export async function shell<T = any>(cmd: string, args: Record<string, unknown> 
 }
 
 export async function pickFolder(): Promise<string | null> {
+  // Scripted runs set WRANGLER_PICK_FOLDER to skip the system picker.
+  const scripted = await shell<string | null>("pick_override").catch(() => null);
+  if (scripted) return scripted;
   const { open } = await import("@tauri-apps/plugin-dialog");
   const r = await open({ directory: true, multiple: false, title: "Choose a Harness Wrangler project folder" });
   return typeof r === "string" ? r : null;
