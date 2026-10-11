@@ -51,18 +51,25 @@ fn open_project(shell: &Shell, project: Project) -> Result<String, String> {
     Ok(root.to_string_lossy().to_string())
 }
 
+fn open_at(shell: &Shell, path: &str) -> Result<String, String> {
+    // Accept the project folder itself or anything inside it.
+    let project = Project::discover(Path::new(path)).map_err(|_| format!("{path} is not a Harness Wrangler project (no wrangler.toml or experiments/ folder). Use \"Create project in a folder\" to start one there."))?;
+    open_project(shell, project)
+}
+
+fn init_at(shell: &Shell, path: &str) -> Result<String, String> {
+    let project = Project::init(Path::new(path)).map_err(|e| format!("{e:#}"))?;
+    open_project(shell, project)
+}
+
 #[tauri::command]
 fn project_open(path: String, shell: State<Shell>) -> Result<String, String> {
-    let dir = Path::new(&path);
-    // Accept the project folder itself or anything inside it.
-    let project = Project::discover(dir).map_err(|_| format!("{path} is not a Harness Wrangler project (no wrangler.toml or experiments/ folder). Use \"Create project in a folder\" to start one there."))?;
-    open_project(&shell, project)
+    open_at(&shell, &path)
 }
 
 #[tauri::command]
 fn project_init(path: String, shell: State<Shell>) -> Result<String, String> {
-    let project = Project::init(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
-    open_project(&shell, project)
+    init_at(&shell, &path)
 }
 
 #[tauri::command]
@@ -128,4 +135,53 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![project_open, project_init, project_current, project_close, recent_projects, api])
         .run(tauri::generate_context!())
         .expect("error while running Harness Wrangler");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn shell(config: &Path) -> Shell {
+        let s = Shell::default();
+        *s.config_dir.lock().unwrap() = Some(config.to_path_buf());
+        s
+    }
+
+    #[test]
+    fn create_open_and_recent_projects() {
+        let tmp = std::env::temp_dir().join(format!("wrangler-shell-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (a, b, plain) = (tmp.join("a"), tmp.join("b"), tmp.join("plain"));
+        std::fs::create_dir_all(&plain).unwrap();
+        let sh = shell(&tmp.join("config"));
+
+        // Opening a folder that is not a project explains what to do instead.
+        let err = open_at(&sh, plain.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not a Harness Wrangler project") && err.contains("Create project"), "{err}");
+        assert!(sh.api.lock().unwrap().is_none());
+
+        // Creating one lays out the folders and opens it.
+        let root_a = init_at(&sh, a.to_str().unwrap()).unwrap();
+        for d in ["experiments", "tasks", "overlays/none", "fixtures", "rubrics", "suites"] {
+            assert!(Path::new(&root_a).join(d).is_dir(), "missing {d}");
+        }
+        let api = sh.api.lock().unwrap().clone().unwrap();
+        assert_eq!(api.dispatch("experiments_list", &json!({})).unwrap(), json!([]));
+        assert!(api.dispatch("project_info", &json!({})).unwrap()["root"].as_str().unwrap().ends_with("/a"));
+        drop(api);
+
+        // A second project, then reopening the first from a folder inside it.
+        let root_b = init_at(&sh, b.to_str().unwrap()).unwrap();
+        let reopened = open_at(&sh, a.join("experiments").to_str().unwrap()).unwrap();
+        assert_eq!(reopened, root_a);
+        // Most recent first, no duplicates, and it survives a restart of the shell.
+        assert_eq!(read_recent(&sh), vec![root_a.clone(), root_b.clone()]);
+        assert_eq!(read_recent(&shell(&tmp.join("config"))), vec![root_a, root_b.clone()]);
+        // Folders that have since been deleted drop out of the list.
+        *sh.api.lock().unwrap() = None;
+        std::fs::remove_dir_all(&a).unwrap();
+        assert_eq!(read_recent(&sh), vec![root_b]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
