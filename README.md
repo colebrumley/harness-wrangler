@@ -131,6 +131,6 @@ WRANGLER_LIVE=1 WRANGLER_LIVE_CODEX=1 cargo test -p wrangler-core --test live_ru
 ## Known limits
 
 - The Codex runner runs under Codex's own `workspace-write` sandbox by default and reports tokens but not dollar cost. Set `[runner] codex_sandbox` to change the sandbox mode.
-- `isolation = "docker"` needs an image with the runner CLI and an API key or token in the environment; a subscription login cannot enter a container. It is tested with a stand-in runner, not a real Claude Code image.
+- `isolation = "docker"` needs an image with the runner CLI and a token in the environment (`claude setup-token` gives one for a subscription); the keychain login cannot enter a container.
 - `budget_usd` caps a launch's cost; Codex runs report no cost and do not count toward it.
 - Runs use `bypassPermissions`. Use `isolation = "seatbelt"` for fixtures you do not trust.

@@ -58,7 +58,7 @@ What was tested, with an image built from `node:22-slim` plus `npm install -g @a
 
 - A stand-in runner in `alpine` ran on Linux in the mounted workspace, could not see host paths outside it, and left no container behind.
 - Real Codex ran a task end to end in the container, authenticated through the read-only `auth.json` mount.
-- Real Claude Code started in the container and stopped at "Not logged in", which is recorded as a failed run with that message. A full Claude Code run under Docker needs `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, and this machine has neither.
+- Real Claude Code ran the bugfix task end to end in the container (with and without a `CLAUDE.md` overlay) and passed its tests, authenticated with `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, passed by name. The token did not appear in any run artifact. Without a token it stops at "Not logged in", recorded as a failed run with that message.
 
 ## Budget
 
