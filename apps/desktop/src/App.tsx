@@ -31,7 +31,11 @@ export interface Ctx {
 function ProjectGate({ onReady }: { onReady: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [recent, setRecent] = useState<string[]>([]);
-  useEffect(() => { shell<string[]>("recent_projects").then(setRecent).catch(() => {}); }, []);
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    shell<string[]>("recent_projects").then(setRecent).catch(() => {});
+    shell<string | null>("project_pending").then(setPending).catch(() => {});
+  }, []);
   const open = async (path: string | null, init = false) => {
     if (!path) return;
     try {
@@ -49,6 +53,7 @@ function ProjectGate({ onReady }: { onReady: () => void }) {
           <button className="btn" onClick={async () => open(await pickFolder(), true)}>Create project in a folder</button>
         </div>
         <ErrorNote error={error} />
+        {pending && <div className="note">Opening {pending}… If macOS asks whether Harness Wrangler may access this folder, choose Allow.</div>}
         {recent.length > 0 && (
           <section className="panel">
             <header><h2>Recent</h2></header>
@@ -68,6 +73,27 @@ export default function App() {
   useEffect(() => {
     if (inTauri) shell<string | null>("project_current").then((p) => setReady(!!p)).catch(() => setReady(false));
   }, []);
+
+  // File menu: Open Project, New Project, Close Project, Open Recent.
+  useEffect(() => {
+    if (!inTauri) return;
+    let off: (() => void)[] = [];
+    let gone = false;
+    const reopen = () => { setMenuError(null); setRun(null); setReady(true); setProjectKey((k) => k + 1); window.location.hash = "/experiments"; };
+    import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const a = await listen<string>("project-menu", async (e) => {
+        if (e.payload === "project-close") { await shell("project_close"); setRun(null); setReady(false); return; }
+        const path = await pickFolder();
+        if (!path) return;
+        try { await shell(e.payload === "project-new" ? "project_init" : "project_open", { path }); reopen(); }
+        catch (err: any) { setMenuError(String(err.message ?? err)); }
+      });
+      const b = await listen<string | null>("project-changed", (e) => { if (e.payload) setMenuError(e.payload); else reopen(); });
+      if (gone) { a(); b(); } else off = [a, b];
+    });
+    return () => { gone = true; off.forEach((f) => f()); };
+  }, []);
+  const [menuError, setMenuError] = useState<string | null>(null);
 
   const project = useLoad(ready ? "project_info" : null, {}, [projectKey]);
   const launchesQ = useLoad<LaunchSummary[]>(ready ? "launches_list" : null, {}, [projectKey], 4000);
@@ -94,7 +120,7 @@ export default function App() {
     return () => { live = false; };
   }, [launchId, ready, view]);
 
-  if (!ready) return <div className="app" style={{ gridTemplateColumns: "1fr" }}><ProjectGate onReady={() => { setReady(true); setProjectKey((k) => k + 1); }} /></div>;
+  if (!ready) return <div className="app" style={{ gridTemplateColumns: "1fr" }}>{menuError && <div style={{ padding: "16px 24px 0" }}><ErrorNote error={menuError} /></div>}<ProjectGate key={menuError ?? ""} onReady={() => { setReady(true); setProjectKey((k) => k + 1); }} /></div>;
 
   const perLaunch = ["results", "review", "ablation", "advice"].includes(view);
   const href = (id: string) => (["results", "review", "ablation", "advice"].includes(id) && launchId ? `#/${id}/${launchId}` : `#/${id}`);
@@ -139,7 +165,7 @@ export default function App() {
             {current && <a className="small" href={`#/experiments/${encodeURIComponent(current.experiment)}`}>Open experiment</a>}
           </div>
         )}
-        <ErrorNote error={project.error} />
+        <ErrorNote error={menuError ?? project.error} />
         {view === "experiments" && <Experiments ctx={ctx} selected={parts[1] ?? null} sub={parts[2] ?? null} />}
         {view === "results" && <Results ctx={ctx} />}
         {view === "review" && <Review ctx={ctx} />}

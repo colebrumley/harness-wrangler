@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window: core commands and the folder picker.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "core:event:default", "dialog:allow-open"]
 }

@@ -5,12 +5,15 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, State};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Emitter, Manager, State};
 use wrangler_core::api::Api;
 use wrangler_core::Project;
 
 #[derive(Default)]
 struct Shell {
+    /// Project being opened in the background at startup, if any.
+    opening: Mutex<Option<String>>,
     api: Mutex<Option<Arc<Api>>>,
     config_dir: Mutex<Option<PathBuf>>,
 }
@@ -63,18 +66,53 @@ fn init_at(shell: &Shell, path: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn project_open(path: String, shell: State<Shell>) -> Result<String, String> {
-    open_at(&shell, &path)
+fn project_open(path: String, shell: State<Shell>, app: AppHandle) -> Result<String, String> {
+    let root = open_at(&shell, &path)?;
+    install_menu(&app);
+    Ok(root)
 }
 
 #[tauri::command]
-fn project_init(path: String, shell: State<Shell>) -> Result<String, String> {
-    init_at(&shell, &path)
+fn project_init(path: String, shell: State<Shell>, app: AppHandle) -> Result<String, String> {
+    let root = init_at(&shell, &path)?;
+    install_menu(&app);
+    Ok(root)
+}
+
+/// File menu: the project actions, with the recent projects listed. Rebuilt
+/// whenever the recent list changes.
+fn install_menu(app: &AppHandle) {
+    let build = || -> tauri::Result<()> {
+        let menu = Menu::default(app)?;
+        let recent = read_recent(&app.state::<Shell>());
+        let recent_menu = Submenu::with_id(app, "project-recent", "Open Recent", !recent.is_empty())?;
+        for (i, path) in recent.iter().enumerate() {
+            recent_menu.append(&MenuItem::with_id(app, format!("project-recent-{i}"), path, true, None::<&str>)?)?;
+        }
+        for item in menu.items()? {
+            if let Some(file) = item.as_submenu().filter(|m| m.text().map(|t| t == "File").unwrap_or(false)) {
+                file.insert(&MenuItem::with_id(app, "project-open", "Open Project…", true, Some("CmdOrCtrl+O"))?, 0)?;
+                file.insert(&MenuItem::with_id(app, "project-new", "New Project…", true, Some("CmdOrCtrl+Shift+N"))?, 1)?;
+                file.insert(&recent_menu, 2)?;
+                file.insert(&MenuItem::with_id(app, "project-close", "Close Project", true, None::<&str>)?, 3)?;
+                file.insert(&PredefinedMenuItem::separator(app)?, 4)?;
+            }
+        }
+        app.set_menu(menu)?;
+        Ok(())
+    };
+    let _ = build();
 }
 
 #[tauri::command]
 fn project_current(shell: State<Shell>) -> Option<String> {
     shell.api.lock().unwrap().as_ref().map(|a| a.project.root.to_string_lossy().to_string())
+}
+
+/// Path of the project still being opened at startup, if any.
+#[tauri::command]
+fn project_pending(shell: State<Shell>) -> Option<String> {
+    shell.opening.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -98,19 +136,53 @@ async fn api(cmd: String, args: Value, shell: State<'_, Shell>) -> Result<Value,
 }
 
 /// Apps started from Finder get a bare PATH without the user's shell setup,
-/// so `claude`, `codex` and `git` would not be found. Take PATH from a login
-/// shell once at startup.
+/// so `claude`, `codex` and `git` would not be found. Ask a login shell for
+/// its PATH, then add the usual install locations.
+///
+/// The shell is non-interactive and time-boxed: an interactive shell with
+/// no terminal can block forever in the user's rc files, which would hang
+/// the app before its window opens.
 fn adopt_login_shell_path() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let out = std::process::Command::new(&shell).args(["-lic", "printf '__PATH__%s__END__' \"$PATH\""]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
-    if let Ok(out) = out {
-        let text = String::from_utf8_lossy(&out.stdout);
-        if let Some(path) = text.split("__PATH__").nth(1).and_then(|r| r.split("__END__").next()) {
-            if !path.is_empty() {
-                std::env::set_var("PATH", path);
+    let mut dirs: Vec<String> = vec![];
+    let child = std::process::Command::new(&shell)
+        .args(["-lc", "printf '__PATH__%s__END__' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let finished = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(25)),
+                _ => break false,
             }
+        };
+        if finished {
+            if let Ok(out) = child.wait_with_output() {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                if let Some(path) = text.split("__PATH__").nth(1).and_then(|r| r.split("__END__").next()) {
+                    dirs.extend(path.split(':').filter(|d| !d.is_empty()).map(|d| d.to_string()));
+                }
+            }
+        } else {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
+    dirs.extend(std::env::var("PATH").unwrap_or_default().split(':').filter(|d| !d.is_empty()).map(|d| d.to_string()));
+    // PATH set only in an interactive rc file is not visible above.
+    let home = std::env::var("HOME").unwrap_or_default();
+    for d in [format!("{home}/.local/bin"), format!("{home}/.claude/local"), "/opt/homebrew/bin".into(), "/usr/local/bin".into(), format!("{home}/.cargo/bin"), format!("{home}/.bun/bin"), format!("{home}/.npm-global/bin"), format!("{home}/.volta/bin")] {
+        if Path::new(&d).is_dir() {
+            dirs.push(d);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(d.clone()));
+    std::env::set_var("PATH", dirs.join(":"));
 }
 
 pub fn run() {
@@ -121,18 +193,41 @@ pub fn run() {
         .setup(|app| {
             let shell = app.state::<Shell>();
             *shell.config_dir.lock().unwrap() = app.path().app_config_dir().ok();
-            // Open straight into a project when one is given or was open last time.
+            // Open straight into a project when one is given or was open last
+            // time. Off the main thread: the first read of a folder under
+            // Documents or Desktop makes macOS ask for permission, and that
+            // prompt must not hold up the window.
             let candidates: Vec<String> = std::env::args().nth(1).into_iter().chain(std::env::var("WRANGLER_PROJECT").ok()).chain(read_recent(&shell).into_iter().take(1)).collect();
-            for c in candidates {
-                if let Ok(project) = Project::discover(Path::new(&c)) {
-                    if open_project(&shell, project).is_ok() {
-                        break;
-                    }
-                }
+            if let Some(first) = candidates.first() {
+                *shell.opening.lock().unwrap() = Some(first.clone());
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let shell = handle.state::<Shell>();
+                    let opened = candidates.iter().any(|c| open_at(&shell, c).is_ok());
+                    *shell.opening.lock().unwrap() = None;
+                    install_menu(&handle);
+                    let _ = handle.emit("project-changed", (!opened).then(|| "The last project could not be opened. Choose a project folder.".to_string()));
+                });
             }
+            install_menu(app.handle());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![project_open, project_init, project_current, project_close, recent_projects, api])
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref().to_string();
+            if let Some(i) = id.strip_prefix("project-recent-").and_then(|n| n.parse::<usize>().ok()) {
+                // Opening a recent project needs no dialog: do it here, then tell the window.
+                let shell = app.state::<Shell>();
+                if let Some(path) = read_recent(&shell).get(i).cloned() {
+                    let result = open_at(&shell, &path);
+                    install_menu(app);
+                    let _ = app.emit("project-changed", result.err());
+                }
+            } else if id.starts_with("project-") {
+                // Open, new and close run in the window, which owns the folder picker.
+                let _ = app.emit("project-menu", id);
+            }
+        })
+        .invoke_handler(tauri::generate_handler![project_open, project_init, project_current, project_pending, project_close, recent_projects, api])
         .run(tauri::generate_context!())
         .expect("error while running Harness Wrangler");
 }
@@ -141,6 +236,33 @@ pub fn run() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn path_lookup_cannot_hang_and_finds_the_usual_places() {
+        let before = std::env::var("PATH").unwrap_or_default();
+        // A "shell" that never returns must not block startup.
+        let tmp = std::env::temp_dir().join(format!("wrangler-slow-shell-{}", std::process::id()));
+        std::fs::write(&tmp, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let real_shell = std::env::var("SHELL").ok();
+        std::env::set_var("SHELL", &tmp);
+        std::env::set_var("PATH", "/usr/bin:/bin");
+        let start = std::time::Instant::now();
+        adopt_login_shell_path();
+        assert!(start.elapsed() < std::time::Duration::from_secs(6), "startup blocked for {:?}", start.elapsed());
+        let path = std::env::var("PATH").unwrap();
+        assert!(path.contains("/usr/bin"));
+        let home = std::env::var("HOME").unwrap();
+        if Path::new(&format!("{home}/.local/bin")).is_dir() {
+            assert!(path.contains(&format!("{home}/.local/bin")), "{path}");
+        }
+        match real_shell {
+            Some(s) => std::env::set_var("SHELL", s),
+            None => std::env::remove_var("SHELL"),
+        }
+        std::env::set_var("PATH", before);
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     fn shell(config: &Path) -> Shell {
         let s = Shell::default();

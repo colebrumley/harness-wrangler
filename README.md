@@ -46,6 +46,8 @@ Then open the app and choose the `examples` folder, or serve the same UI to a br
 cd examples && ../target/release/wrangler serve
 ```
 
+The app's File menu has Open Project, New Project, Open Recent and Close Project. The first time it reads a project under Documents or Desktop, macOS asks whether to allow access; choose Allow.
+
 ## A real experiment
 
 `examples/experiments/rfw-writing.toml` asks whether `reader-first-writing` improves two writing tasks on Haiku, scored by a Sonnet judge. It makes 20 agent runs and about 30 judge calls.
