@@ -95,6 +95,10 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             }
         }
         let file_target = json!({"type": "file", "file": ab.source});
+        if let Some(e) = ab.full_effect.as_ref().filter(|e| e.verdict == Verdict::Inconclusive) {
+            let need = runs_needed(e, r.runs_per_cell).map(|n| format!(" About {n} runs per cell would resolve an effect of this size (now {}).", r.runs_per_cell)).unwrap_or_default();
+            push("more_runs", 2, format!("The whole file's effect on {} is inconclusive ({}){on_model}, so no section can be attributed yet.{need} Adding tasks narrows the interval faster than adding repetitions when there are only {} paired task(s).", pinfo.label.to_lowercase(), ci(&pinfo, e), e.units), file_target.clone(), &pm, evidence(e, launch_id), "low");
+        }
         match ab.full_effect.as_ref().map(|e| (e, e.verdict)) {
             Some((e, Verdict::Neutral)) => push("retire_pattern", 1, format!("Consider retiring {}: with every section in place it has no measurable effect on {} ({}){on_model}.", ab.source, pinfo.label.to_lowercase(), ci(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "medium"),
             Some((e, Verdict::Worse)) | Some((e, Verdict::Lower)) => push("retire_pattern", 1, format!("Remove {}: as a whole it {}{on_model}.", ab.source, moves(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "high"),
