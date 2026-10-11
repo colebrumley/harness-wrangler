@@ -19,6 +19,8 @@ export default function Experiments({ ctx, selected, sub }: { ctx: Ctx; selected
   useEffect(() => {
     if (!selected && items.length > 0) ctx.go(`/experiments/${encodeURIComponent(items[0].name)}`);
   }, [selected, items.length]);
+  // False only once the list has loaded without the selected name in it.
+  const listed = !list.data || items.some((e) => e.name === selected);
   return (
     <div className="content">
       <div className="split" style={{ maxWidth: 1320 }}>
@@ -49,8 +51,8 @@ export default function Experiments({ ctx, selected, sub }: { ctx: Ctx; selected
         <div className="stack" style={{ minWidth: 0 }}>
           {selected === "~tasks" && <Tasks ctx={ctx} />}
           {selected === "new" && <Editor name={null} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
-          {selected && selected !== "new" && selected !== "~tasks" && sub === "edit" && <Editor name={selected} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
-          {selected && selected !== "new" && selected !== "~tasks" && sub !== "edit" && <Detail name={selected} ctx={ctx} onChanged={list.reload} />}
+          {selected && selected !== "new" && selected !== "~tasks" && sub === "edit" && <Editor name={selected} listed={listed} ctx={ctx} onSaved={(n) => { list.reload(); ctx.go(`/experiments/${encodeURIComponent(n)}`); }} />}
+          {selected && selected !== "new" && selected !== "~tasks" && sub !== "edit" && <Detail name={selected} listed={listed} ctx={ctx} onChanged={list.reload} />}
           {!selected && list.data && items.length === 0 && (
             <Empty title="This project is empty, which is the normal starting point">
               <p style={{ maxWidth: "62ch", margin: "0 auto 14px" }}>
@@ -76,7 +78,24 @@ function levelLabel(kind: string, l: any): string {
   return kind === "overlay" ? l.replace(/\/$/, "").split("/").pop()! : l.split("\n")[0].slice(0, 48);
 }
 
-function Detail({ name, ctx, onChanged }: { name: string; ctx: Ctx; onChanged: () => void }) {
+/** The route names an experiment whose file is gone: deleted, renamed, or a stale link. */
+function Missing({ name, ctx }: { name: string; ctx: Ctx }) {
+  const mine = ctx.launches.filter((l) => l.experiment === name);
+  return (
+    <Empty title={`No experiment named ${name}`}>
+      <p style={{ maxWidth: "62ch", margin: "0 auto 14px" }}>
+        Its file is not in this project's experiments folder. It may have been deleted or renamed.
+        {mine.length > 0 && ` The results of its ${mine.length === 1 ? "launch" : `${mine.length} launches`} are still here.`}
+      </p>
+      <div className="row" style={{ justifyContent: "center" }}>
+        {mine.length > 0 && <button className="btn primary" onClick={() => ctx.go(`/results/${mine[0].id}`)}>See its results</button>}
+        <button className="btn" onClick={() => ctx.go("/experiments")}>Back to experiments</button>
+      </div>
+    </Empty>
+  );
+}
+
+function Detail({ name, listed, ctx, onChanged }: { name: string; listed: boolean; ctx: Ctx; onChanged: () => void }) {
   const mine = ctx.launches.filter((l) => l.experiment === name);
   const busy = mine.some((l) => l.status === "running");
   const q = useLoad<any>("experiment_get", { name }, [mine.length], busy ? 3000 : 0);
@@ -87,7 +106,7 @@ function Detail({ name, ctx, onChanged }: { name: string; ctx: Ctx; onChanged: (
   const d = q.data;
   useEffect(() => { setOpen(null); setError(null); }, [name]);
   useEffect(() => { if (open === null && mine[0]) setOpen(mine[0].id); }, [mine.length, name]);
-  if (!d) return <ErrorNote error={q.error} />;
+  if (!d) return q.error && !listed ? <Missing name={name} ctx={ctx} /> : <ErrorNote error={q.error} />;
   const def = d.def;
   const launch = async () => {
     setError(null);
@@ -347,7 +366,7 @@ function JudgeFeed({ j, total, ctx, live }: { j: any; total: number; ctx: Ctx; l
 
 // ------------------------------------------------------------------ editor
 
-function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved: (name: string) => void }) {
+function Editor({ name, listed = true, ctx, onSaved }: { name: string | null; listed?: boolean; ctx: Ctx; onSaved: (name: string) => void }) {
   const [toml, setToml] = useState<string | null>(null);
   const [mode, setMode] = useState<"form" | "toml">("form");
   const [check, setCheck] = useState<any>(null);
@@ -370,7 +389,7 @@ function Editor({ name, ctx, onSaved }: { name: string | null; ctx: Ctx; onSaved
   const renderSeq = useRef(0);
   useEffect(() => { setFormDef(null); }, [name]);
   useEffect(() => { if (check?.def && (mode === "toml" || !formDef)) setFormDef(check.def); }, [check, mode]);
-  if (toml === null) return <ErrorNote error={error} />;
+  if (toml === null) return error && name && !listed ? <Missing name={name} ctx={ctx} /> : <ErrorNote error={error} />;
   const def = formDef;
   const patch = (fn: (d: any) => void) => {
     if (!def) return;
