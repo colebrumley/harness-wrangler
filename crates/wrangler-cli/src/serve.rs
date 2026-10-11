@@ -98,20 +98,27 @@ fn handle(api: &Arc<Api>, ui: &Option<PathBuf>, port: u16, mut req: Request) {
 pub fn serve(project: Project, port: u16, ui: Option<PathBuf>) -> Result<()> {
     let api = Api::new(project)?;
     let ui = ui_dir(ui);
-    let server = Arc::new(Server::http(("127.0.0.1", port)).map_err(|e| anyhow!("binding 127.0.0.1:{port}: {e}"))?);
-    eprintln!("wrangler serving {} on http://127.0.0.1:{port}", api.project.root.display());
+    // Loopback only, on both address families: browsers resolve `localhost` to either.
+    let v4 = Server::http(("127.0.0.1", port)).map_err(|e| anyhow!("binding 127.0.0.1:{port}: {e}"))?;
+    let mut servers = vec![Arc::new(v4)];
+    if let Ok(v6) = Server::http(("::1", port)) {
+        servers.push(Arc::new(v6));
+    }
+    eprintln!("wrangler serving {} on http://localhost:{port}", api.project.root.display());
     match &ui {
         Some(d) => eprintln!("web UI from {}", d.display()),
         None => eprintln!("web UI not built (API only). Build it with: cd apps/desktop && npm install && npm run build"),
     }
     let mut workers = vec![];
-    for _ in 0..8 {
-        let (server, api, ui) = (server.clone(), api.clone(), ui.clone());
-        workers.push(std::thread::spawn(move || {
-            while let Ok(req) = server.recv() {
-                handle(&api, &ui, port, req);
-            }
-        }));
+    for server in &servers {
+        for _ in 0..6 {
+            let (server, api, ui) = (server.clone(), api.clone(), ui.clone());
+            workers.push(std::thread::spawn(move || {
+                while let Ok(req) = server.recv() {
+                    handle(&api, &ui, port, req);
+                }
+            }));
+        }
     }
     for w in workers {
         let _ = w.join();

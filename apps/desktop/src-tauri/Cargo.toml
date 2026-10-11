@@ -1,0 +1,20 @@
+[package]
+name = "harness-wrangler-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "harness_wrangler_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+wrangler-core = { path = "../../../crates/wrangler-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

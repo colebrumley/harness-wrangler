@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/wrangler-core", "crates/wrangler-cli"]
-default-members = ["crates/wrangler-core", "crates/wrangler-cli"]
+members = ["crates/wrangler-core", "crates/wrangler-cli", "apps/desktop/src-tauri"]
+default-members = ["crates/wrangler-core", "crates/wrangler-cli", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

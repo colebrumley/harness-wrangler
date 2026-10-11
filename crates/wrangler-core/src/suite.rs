@@ -164,7 +164,7 @@ pub fn dashboard(project: &Project, store: &Store, suite_name: &str) -> Result<D
 pub struct DiffItem {
     pub experiment: String,
     pub pattern: String,
-    /// regressed | redundant | inconclusive | no_effect | earning | new
+    /// harming | regressed | redundant | inconclusive | no_effect | earning | new
     pub category: String,
     pub priority: u32,
     pub summary: String,
@@ -214,6 +214,7 @@ pub fn diff(project: &Project, store: &Store, suite_name: &str, new_model: &str,
         };
         let prev_v = prev.as_ref().map(|p| p.verdict.as_str());
         let (category, priority) = match (new.verdict.as_str(), prev_v) {
+            ("harming", Some("harming")) => ("harming", 1),
             ("harming", _) => ("regressed", 1),
             ("neutral", Some("helping")) if caught_up => ("redundant", 3),
             ("neutral", Some("helping")) => ("regressed", 2),
@@ -228,6 +229,7 @@ pub fn diff(project: &Project, store: &Store, suite_name: &str, new_model: &str,
             None => "no previous baseline".to_string(),
         };
         let lead = match category {
+            "harming" => "still hurts",
             "regressed" if new.verdict == "harming" => "now hurts",
             "regressed" => "stopped helping",
             "redundant" => "now redundant: the model alone reaches what this pattern used to add",

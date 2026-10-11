@@ -177,8 +177,8 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             "flaky_task",
             6,
             format!(
-                "{} is flaky in {} cell(s): for example {} on {} averages {} with sd {} in \"{}\" (n={}). Tighten the task or raise runs_per_cell above {}.",
-                if flaky_tasks.len() == 1 { format!("Task {}", flaky_tasks[0]) } else { format!("Tasks {}", flaky_tasks.join(", ")) },
+                "{} flaky in {} cell(s): for example {} on {} averages {} with sd {} in \"{}\" (n={}). Tighten the task or raise runs_per_cell above {}.",
+                if flaky_tasks.len() == 1 { format!("Task {} is", flaky_tasks[0]) } else { format!("Tasks {} are", flaky_tasks.join(", ")) },
                 cells.len(),
                 i.label.to_lowercase(),
                 worst.task_id,

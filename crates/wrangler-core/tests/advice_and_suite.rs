@@ -120,9 +120,9 @@ fn suite_baselines_and_new_model_diff() {
     let d = suite::diff(&project, &store, "s", "mock-opus", None).unwrap();
     assert_eq!(d.prev_model.as_deref(), Some("mock-sonnet"));
     assert_eq!(d.items[0].pattern, "noisy", "the harming pattern is first");
-    assert_eq!(d.items[0].category, "regressed");
+    assert_eq!(d.items[0].category, "harming", "it hurt on the previous model too, so it is not a regression");
     assert_eq!(d.items.last().unwrap().category, "earning");
-    assert!(suite::render_diff_text(&d).contains("REGRESSED") && suite::render_dashboard_text(&dash).contains("helping"));
+    assert!(suite::render_diff_text(&d).contains("HARMING") && suite::render_dashboard_text(&dash).contains("helping"));
     // Rerunning the older model does not make it the "new" one.
     suite::run_model(&project, &store, "s", "mock-sonnet", &RunOptions::default(), no_cancel(), &|_| {}).unwrap();
     assert_eq!(suite::dashboard(&project, &store, "s").unwrap().models, vec!["mock-sonnet", "mock-opus"]);
