@@ -395,7 +395,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         }
     }
     let ablation = exp.ablation.as_ref().map(|meta| build_ablation(&data, meta, &primary));
-    let sum = |name: &str| data.metrics.values().filter_map(|m| m.get(name)).sum::<f64>();
+    let sum = |name: &str| data.metrics.values().filter_map(|m| m.get(name)).sum::<f64>() + 0.0;
 
     Ok(Report {
         launch_id,
@@ -408,7 +408,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         runs_per_cell: exp.runs_per_cell,
         counts,
         cost_usd: sum("cost_usd"),
-        judge_cost_usd: sum("judge_cost_usd") + judgments.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum::<f64>(),
+        judge_cost_usd: sum("judge_cost_usd") + judgments.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum::<f64>() + 0.0,
         primary_metric: primary,
         metrics: metric_names.iter().map(|m| stats::metric_info(m)).collect(),
         factors: exp.factors.iter().map(|f| FactorInfo { name: f.name.clone(), kind: f.kind.as_str().into(), levels: f.levels.iter().map(|l| l.label()).collect() }).collect(),

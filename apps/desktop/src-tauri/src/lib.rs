@@ -90,7 +90,24 @@ async fn api(cmd: String, args: Value, shell: State<'_, Shell>) -> Result<Value,
         .map_err(|e| e.to_string())?
 }
 
+/// Apps started from Finder get a bare PATH without the user's shell setup,
+/// so `claude`, `codex` and `git` would not be found. Take PATH from a login
+/// shell once at startup.
+fn adopt_login_shell_path() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let out = std::process::Command::new(&shell).args(["-lic", "printf '__PATH__%s__END__' \"$PATH\""]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
+    if let Ok(out) = out {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(path) = text.split("__PATH__").nth(1).and_then(|r| r.split("__END__").next()) {
+            if !path.is_empty() {
+                std::env::set_var("PATH", path);
+            }
+        }
+    }
+}
+
 pub fn run() {
+    adopt_login_shell_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Shell::default())

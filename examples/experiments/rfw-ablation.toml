@@ -1,0 +1,186 @@
+name = "rfw-ablation"
+description = "Section ablation of overlays/rfw-v1.1.0/.claude/skills/reader-first-writing/SKILL.md (split at heading depth 2)"
+runs_per_cell = 5
+timeout_secs = 900
+isolation = "workspace"
+network = "full"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+model = "claude-sonnet-5-5"
+max_retries = 4
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+
+[[factors.levels]]
+value = "overlays/none"
+label = "none"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/full"
+label = "full"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-01-reader-first-writing"
+label = "−Reader-first writing"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-02-before-anything-decide-what-this-should"
+label = "−Before anything: decide what thi…"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-03-round-1-the-document"
+label = "−Round 1: the document"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-04-round-2-paragraphs"
+label = "−Round 2: paragraphs"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-05-round-3-sentences"
+label = "−Round 3: sentences"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-06-round-4-words"
+label = "−Round 4: words"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-07-throughout-keep-the-meaning-fixed"
+label = "−Throughout: keep the meaning fix…"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-08-what-to-return"
+label = "−What to return"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-09-before-you-send"
+label = "−Before you send"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/without-10-references"
+label = "−References"
+
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/description-only"
+label = "description-only"
+
+[tasks]
+include = ["tasks/writing/*.toml"]
+
+[graders.default.judge]
+model = "claude-opus-5-5"
+rubric = "rubrics/reader-first.md"
+rubric_scoring = true
+pairwise = false
+
+[ablation]
+source = "overlays/rfw-v1.1.0/.claude/skills/reader-first-writing/SKILL.md"
+kind = "skill"
+depth = 2
+factor = "overlay"
+baseline = "overlays/none"
+full = "overlays/ablation/rfw-ablation/full"
+description_only = "overlays/ablation/rfw-ablation/description-only"
+
+[[ablation.sections]]
+index = 0
+title = "Reader-first writing"
+overlay = "overlays/ablation/rfw-ablation/without-01-reader-first-writing"
+est_tokens = 171
+lines = [
+    6,
+    18,
+]
+
+[[ablation.sections]]
+index = 1
+title = "Before anything: decide what this should be"
+overlay = "overlays/ablation/rfw-ablation/without-02-before-anything-decide-what-this-should"
+est_tokens = 598
+lines = [
+    19,
+    60,
+]
+
+[[ablation.sections]]
+index = 2
+title = "Round 1: the document"
+overlay = "overlays/ablation/rfw-ablation/without-03-round-1-the-document"
+est_tokens = 728
+lines = [
+    61,
+    113,
+]
+
+[[ablation.sections]]
+index = 3
+title = "Round 2: paragraphs"
+overlay = "overlays/ablation/rfw-ablation/without-04-round-2-paragraphs"
+est_tokens = 115
+lines = [
+    114,
+    123,
+]
+
+[[ablation.sections]]
+index = 4
+title = "Round 3: sentences"
+overlay = "overlays/ablation/rfw-ablation/without-05-round-3-sentences"
+est_tokens = 364
+lines = [
+    124,
+    153,
+]
+
+[[ablation.sections]]
+index = 5
+title = "Round 4: words"
+overlay = "overlays/ablation/rfw-ablation/without-06-round-4-words"
+est_tokens = 483
+lines = [
+    154,
+    187,
+]
+
+[[ablation.sections]]
+index = 6
+title = "Throughout: keep the meaning fixed"
+overlay = "overlays/ablation/rfw-ablation/without-07-throughout-keep-the-meaning-fixed"
+est_tokens = 312
+lines = [
+    188,
+    211,
+]
+
+[[ablation.sections]]
+index = 7
+title = "What to return"
+overlay = "overlays/ablation/rfw-ablation/without-08-what-to-return"
+est_tokens = 193
+lines = [
+    212,
+    228,
+]
+
+[[ablation.sections]]
+index = 8
+title = "Before you send"
+overlay = "overlays/ablation/rfw-ablation/without-09-before-you-send"
+est_tokens = 218
+lines = [
+    229,
+    246,
+]
+
+[[ablation.sections]]
+index = 9
+title = "References"
+overlay = "overlays/ablation/rfw-ablation/without-10-references"
+est_tokens = 105
+lines = [
+    247,
+    256,
+]
