@@ -20,12 +20,20 @@ export async function shell<T = any>(cmd: string, args: Record<string, unknown> 
   return invoke<T>(cmd, args);
 }
 
+/** Folder the picker starts in: beside the open project, else beside the most recent one. */
+async function pickerStart(): Promise<string | undefined> {
+  const current = await shell<string | null>("project_current").catch(() => null);
+  const recent = current ? [] : await shell<string[]>("recent_projects").catch(() => []);
+  const near = current ?? recent[0];
+  return near ? near.replace(/\/[^/]+\/?$/, "") || "/" : undefined;
+}
+
 export async function pickFolder(): Promise<string | null> {
   // Scripted runs set WRANGLER_PICK_FOLDER to skip the system picker.
   const scripted = await shell<string | null>("pick_override").catch(() => null);
   if (scripted) return scripted;
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const r = await open({ directory: true, multiple: false, title: "Choose a Harness Wrangler project folder" });
+  const r = await open({ directory: true, multiple: false, title: "Choose a Harness Wrangler project folder", defaultPath: await pickerStart() });
   return typeof r === "string" ? r : null;
 }
 
