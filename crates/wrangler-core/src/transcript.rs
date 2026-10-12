@@ -90,6 +90,26 @@ pub fn input_summary(input: &Value, max: usize) -> String {
     }
 }
 
+/// Does the last paragraph of a message contain a question? Code spans and
+/// fenced blocks are ignored, so `a ? b : c` is not one.
+fn closes_with_question(text: &str) -> bool {
+    let mut prose = String::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            // Drop inline code: every second piece between backticks.
+            prose.push_str(&line.split('`').step_by(2).collect::<Vec<_>>().join(" "));
+            prose.push('\n');
+        }
+    }
+    let last = prose.trim().rsplit("\n\n").next().unwrap_or("").trim();
+    last.split_inclusive('?').any(|piece| piece.ends_with('?') && piece.trim_end_matches('?').chars().rev().take_while(|c| !matches!(c, '.' | '!' | '?' | '\n')).filter(|c| c.is_alphabetic()).count() >= 3)
+}
+
 impl Transcript {
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
         self.turns.iter().flat_map(|t| t.tool_calls.iter())
@@ -148,19 +168,22 @@ impl Transcript {
         self.turns.iter().filter(|t| t.role == "user" && t.simulated).count()
     }
 
-    /// How often the agent asked the user something: assistant turns
-    /// (outside subagents) whose text ends in a question, plus
-    /// `AskUserQuestion` tool calls.
+    /// How often the agent asked the user something: `AskUserQuestion`
+    /// tool calls, plus messages that hand the turn back to the user with a
+    /// question in their closing paragraph. A question followed by a line of
+    /// context ("Which test fails? The name is enough.") still counts; a
+    /// message the agent follows with more work of its own does not.
     pub fn questions_asked(&self) -> usize {
-        self.turns
-            .iter()
-            .filter(|t| t.role == "assistant" && !t.subagent)
-            .map(|t| {
-                let asks = t.tool_calls.iter().filter(|c| c.name == "AskUserQuestion").count();
-                let ends = t.text.trim_end().trim_end_matches(|c: char| matches!(c, '*' | '_' | '`' | ')' | '"' | '\'')).ends_with('?');
-                asks + usize::from(ends && asks == 0 && t.tool_calls.is_empty())
-            })
-            .sum()
+        let mut n = 0;
+        for (i, t) in self.turns.iter().enumerate().filter(|(_, t)| t.role == "assistant" && !t.subagent) {
+            n += t.tool_calls.iter().filter(|c| c.name == "AskUserQuestion").count();
+            // The agent's turn ends here when the next thing said is the user's, or nothing.
+            let hands_over = t.tool_calls.is_empty() && self.turns[i + 1..].iter().find(|x| !x.subagent).map(|x| x.role == "user" && x.tool_results.is_empty()).unwrap_or(true);
+            if hands_over && closes_with_question(&t.text) {
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Last non-empty assistant text outside subagents.
@@ -267,5 +290,26 @@ mod tests {
         assert_eq!(t.calls_before_final(), 1);
         assert_eq!((t.user_turns(), t.questions_asked()), (1, 1));
         assert_eq!(t.tool_trace(1), "1. Bash: ls -la /tmp\n[... 1 more tool calls ...]\n");
+    }
+
+    #[test]
+    fn questions_are_counted_when_the_turn_is_handed_over() {
+        let say = |text: &str| Turn { role: "assistant".into(), text: text.into(), ..Default::default() };
+        let user = |text: &str| Turn { role: "user".into(), text: text.into(), simulated: true, ..Default::default() };
+        let count = |turns: Vec<Turn>| Transcript { turns }.questions_asked();
+        // A question followed by a line of context still asks.
+        assert_eq!(count(vec![say("Which slugify should I look at, and what input fails? An example like `slugify(\"Hello\")` would tell me what to fix."), user("The one in utils.")]), 1);
+        assert_eq!(count(vec![say("Before I touch anything, what input does slugify get wrong?")]), 1);
+        assert_eq!(count(vec![say("**Should I also fix the hyphens?**")]), 1);
+        // A summary, an offer, and code with a question mark are not questions.
+        assert_eq!(count(vec![say("I fixed both bugs. If you have one under a utils path, let me know.")]), 0);
+        assert_eq!(count(vec![say("The fix is `x ? a : b`.\n\n```js\nwhy?\n```\n\nAll tests pass.")]), 0);
+        // An earlier paragraph's question does not make the closing statement one.
+        assert_eq!(count(vec![say("Why did it fail? The regex ran on raw input.\n\nAll 5 tests pass now.")]), 0);
+        // The agent answered its own question by carrying on: not a hand-over.
+        assert_eq!(count(vec![say("Which test fails? Let me look."), Turn { role: "assistant".into(), tool_calls: vec![ToolCall { id: "1".into(), name: "Bash".into(), input: json!({}) }], ..Default::default() }, say("Fixed.")]), 0);
+        // AskUserQuestion counts on its own.
+        let ask = Turn { role: "assistant".into(), tool_calls: vec![ToolCall { id: "q".into(), name: "AskUserQuestion".into(), input: json!({}) }], ..Default::default() };
+        assert_eq!(count(vec![ask, say("Done.")]), 1);
     }
 }
