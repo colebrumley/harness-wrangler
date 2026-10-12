@@ -2,6 +2,8 @@
 //! names the metric and carries its evidence, and the whole list exports as
 //! JSON so an agent can act on it.
 
+use crate::calibration::{Calibration, CalibrationRow};
+use crate::model::Task;
 use crate::report::{self, Comparison, Report};
 use crate::review;
 use crate::stats::{self, Effect, Verdict};
@@ -14,7 +16,7 @@ use serde_json::{json, Value};
 pub struct Suggestion {
     pub id: String,
     /// remove_section | review_section | keep_section | retire_pattern | drop_pattern |
-    /// keep_pattern | no_headroom | placebo_explains | trigger_misses | trigger_overfires | trim_body | change_level | tradeoff |
+    /// keep_pattern | no_headroom | placebo_explains | calibrate_judge | trigger_misses | trigger_overfires | trim_body | change_level | tradeoff |
     /// flaky_task | more_runs | judge_bias | reviewer_flag | failures
     pub kind: String,
     /// 1 is most urgent.
@@ -335,11 +337,111 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
         }
     }
 
+    // ---- how far the judge can be trusted on the tasks behind each suggestion
+    if let Some(cal) = &r.calibration {
+        apply_calibration(&mut out, cal, &launch.tasks);
+        if let Some(s) = calibrate_judge(cal, &launch.tasks, launch_id, launch.def.human_enabled()) {
+            out.push(s);
+        }
+    }
+
     out.sort_by(|a, b| a.priority.cmp(&b.priority));
     for (i, s) in out.iter_mut().enumerate() {
         s.id = format!("L{launch_id}-{:02}", i + 1);
     }
     Ok(out)
+}
+
+/// Task ids a suggestion rests on, when it names them; `None` means the whole launch.
+fn scope_tasks(s: &Suggestion) -> Option<Vec<String>> {
+    let strings = |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().filter_map(|x| x.as_str().or(x["task"].as_str())).map(|x| x.to_string()).collect() };
+    let mut ids = strings(&s.target["tasks"]);
+    ids.extend(s.target["task"].as_str().map(|x| x.to_string()));
+    ids.extend(strings(&s.evidence["cells"]));
+    ids.sort();
+    ids.dedup();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The calibration rows that cover a set of tasks: one per tag the tasks
+/// carry, or the overall row for the whole launch and for untagged tasks.
+fn rows_for<'a>(cal: &'a Calibration, tasks: &[Task], scope: &Option<Vec<String>>) -> Vec<&'a CalibrationRow> {
+    let Some(ids) = scope else { return vec![&cal.overall] };
+    let mut tags: Vec<&str> = tasks.iter().filter(|t| ids.contains(&t.id)).flat_map(|t| t.tags.iter().map(|x| x.as_str())).collect();
+    tags.sort();
+    tags.dedup();
+    let rows: Vec<&CalibrationRow> = tags.iter().filter_map(|t| cal.tag(t)).collect();
+    if rows.is_empty() {
+        vec![&cal.overall]
+    } else {
+        rows
+    }
+}
+
+/// Suggestions that rest on the judge are only as good as the judge. Where
+/// its agreement with human votes is below 0.7, or there are too few votes
+/// to say, each such suggestion drops one confidence step and says why. A
+/// suggestion about named tasks is held to the calibration of those tasks'
+/// tags; one about the whole launch, to the overall figure.
+pub fn apply_calibration(suggestions: &mut [Suggestion], cal: &Calibration, tasks: &[Task]) {
+    for s in suggestions.iter_mut().filter(|s| s.metric == "judge_score" || s.metric == "expectations_passed") {
+        let scope = scope_tasks(s);
+        let untrusted: Vec<&CalibrationRow> = rows_for(cal, tasks, &scope).into_iter().filter(|r| !r.trusted()).collect();
+        let Some(worst) = untrusted.iter().min_by(|a, b| a.agreement.unwrap_or(-1.0).total_cmp(&b.agreement.unwrap_or(-1.0))) else { continue };
+        s.confidence = match s.confidence.as_str() {
+            "high" => "medium",
+            _ => "low",
+        }
+        .into();
+        let agreement = worst.agreement.or(worst.rubric_agreement).map(|a| format!("agreement {:.0}%", a * 100.0)).unwrap_or_else(|| "no agreement figure".into());
+        let n = worst.pairs.max(worst.rubric_pairs);
+        let more: usize = untrusted.iter().map(|r| r.pairs_needed).sum();
+        let ask = if more > 0 { format!("review {more} more pair{}", if more == 1 { "" } else { "s" }) } else { "review more pairs, or switch to a stronger judge model".to_string() };
+        let which = if worst.scope == "all" { String::new() } else { format!(" tagged `{}`", untrusted.iter().map(|r| r.scope.as_str()).collect::<Vec<_>>().join("`, `")) };
+        s.action.push_str(&format!(" The judge is not calibrated on these tasks{which} ({agreement} on {n} pair{}); {ask}.", if n == 1 { "" } else { "s" }));
+        s.evidence["judge_calibration"] = json!({"status": worst.status, "agreement": worst.agreement, "rubric_agreement": worst.rubric_agreement, "pairs": n, "pairs_needed": more, "untrusted": untrusted.iter().map(|r| r.scope.clone()).collect::<Vec<_>>()});
+    }
+}
+
+/// How many pairs to review so every tag reaches the minimum.
+fn calibrate_judge(cal: &Calibration, tasks: &[Task], launch_id: i64, human_review: bool) -> Option<Suggestion> {
+    let tagged = tasks.iter().any(|t| !t.tags.is_empty());
+    let rows: Vec<&CalibrationRow> = if tagged { cal.by_tag.iter().collect() } else { vec![&cal.overall] };
+    // Tags no human has voted on yet have no row; they need the full minimum.
+    let mut missing: Vec<String> = tasks.iter().flat_map(|t| t.tags.iter().cloned()).filter(|t| cal.tag(t).is_none()).collect();
+    missing.sort();
+    missing.dedup();
+    let short: Vec<&&CalibrationRow> = rows.iter().filter(|r| r.status == "not_enough").collect();
+    let low: Vec<&&CalibrationRow> = rows.iter().filter(|r| r.status == "low").collect();
+    let needed: usize = short.iter().map(|r| r.pairs_needed).sum::<usize>() + if tagged { missing.len() * crate::calibration::MIN_PAIRS } else { 0 };
+    if needed == 0 && low.is_empty() {
+        return None;
+    }
+    let per = |r: &&&CalibrationRow| if r.scope == "all" { format!("{} more", r.pairs_needed) } else { format!("{} for `{}`", r.pairs_needed, r.scope) };
+    let mut parts: Vec<String> = short.iter().map(per).collect();
+    parts.extend(missing.iter().filter(|_| tagged).map(|t| format!("{} for `{t}`", crate::calibration::MIN_PAIRS)));
+    let mut action = if needed > 0 {
+        format!("Review {needed} more pair{} so the judge can be checked against you ({}); eight per tag is the minimum.", if needed == 1 { "" } else { "s" }, parts.join(", "))
+    } else {
+        String::new()
+    };
+    for r in &low {
+        let where_ = if r.scope == "all" { "on this launch".to_string() } else { format!("on `{}` tasks", r.scope) };
+        action.push_str(&format!("{}The judge agrees with you on only {:.0}% of {} pairs {where_}; rely on human review there, or try a stronger judge model.", if action.is_empty() { "" } else { " " }, r.agreement.or(r.rubric_agreement).unwrap_or(0.0) * 100.0, r.pairs.max(r.rubric_pairs)));
+    }
+    if needed > 0 {
+        action.push_str(if human_review { " `wrangler review <launch> --for calibration` (or the Review page's calibration mode) serves the pairs that count." } else { " Turn on human review for this experiment, then use the Review page's calibration mode." });
+    }
+    Some(Suggestion {
+        id: String::new(),
+        kind: "calibrate_judge".into(),
+        priority: 2,
+        action,
+        target: json!({"type": "judge", "model": cal.judge_model, "rubric": cal.rubric}),
+        metric: "judge_agreement".into(),
+        evidence: json!({"overall": cal.overall, "by_tag": cal.by_tag, "tags_without_votes": missing, "pairs_needed": needed, "launch_id": launch_id}),
+        confidence: "high".into(),
+    })
 }
 
 pub fn render_text(r: &Report, suggestions: &[Suggestion]) -> String {

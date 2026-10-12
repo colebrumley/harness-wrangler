@@ -84,6 +84,8 @@ Run commands inside a project folder, or pass `-C <dir>`. Every command takes `-
 | `wrangler suite create\|run\|status\|diff` | Tracked suites, per-model baselines, new-model diff. |
 | `wrangler advice <launch\|experiment>` | Suggestions with evidence. `--json` is the export for agents. |
 | `wrangler annotations <launch>` | Human review comments and reactions, grouped by variant. |
+| `wrangler review <launch> [--for calibration] [--vote left\|right\|tie\|both_bad\|skip --left <run> --right <run>]` | Blind pairwise review from the terminal: print the next pair, or record a vote. |
+| `wrangler calibration [--judge m] [--rubric r] [--tag t]` | How often the judge agrees with human votes, pooled over the project by judge model, rubric and task tag. |
 | `wrangler import skill-creator <evals.json>` / `wrangler export benchmark <launch>` | Interop with the skill-creator eval format. |
 | `wrangler serve [--port 4477]` | The JSON API and web UI on localhost. |
 

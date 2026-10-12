@@ -422,6 +422,49 @@ pub fn is_flaky(xs: &[f64], scale: Scale) -> bool {
     }
 }
 
+// ------------------------------------------------------------------- kappa
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Kappa {
+    pub kappa: f64,
+    /// Bootstrapped 95% CI over pairs.
+    pub ci_low: f64,
+    pub ci_high: f64,
+    pub agreement: f64,
+    pub n: usize,
+}
+
+fn kappa_point<A: AsRef<str>, B: AsRef<str>>(pairs: &[&(A, B)]) -> Option<(f64, f64)> {
+    let n = pairs.len() as f64;
+    if pairs.is_empty() {
+        return Option::None;
+    }
+    let mut cats: Vec<&str> = pairs.iter().flat_map(|p| [p.0.as_ref(), p.1.as_ref()]).collect();
+    cats.sort();
+    cats.dedup();
+    let po = pairs.iter().filter(|p| p.0.as_ref() == p.1.as_ref()).count() as f64 / n;
+    let pe: f64 = cats.iter().map(|c| (pairs.iter().filter(|p| p.0.as_ref() == *c).count() as f64 / n) * (pairs.iter().filter(|p| p.1.as_ref() == *c).count() as f64 / n)).sum();
+    // Both raters used one category throughout: agreement is total and chance agreement is too.
+    if (1.0 - pe).abs() < 1e-12 {
+        return Some((if po >= 1.0 - 1e-12 { 1.0 } else { 0.0 }, po));
+    }
+    Some(((po - pe) / (1.0 - pe), po))
+}
+
+/// Cohen's kappa between two raters over the same items, with a
+/// bootstrapped 95% CI. Each pair is (first rater's label, second rater's).
+/// 1 is perfect agreement, 0 is what chance would give, negative is worse
+/// than chance. With few pairs the interval is wide, as it should be.
+pub fn kappa<A: AsRef<str>, B: AsRef<str>>(pairs: &[(A, B)], seed: u64) -> Option<Kappa> {
+    let all: Vec<&(A, B)> = pairs.iter().collect();
+    let (k, po) = kappa_point(&all)?;
+    let mut rng = Rng::new(seed);
+    let mut boots: Vec<f64> = (0..BOOTSTRAP_ITERS).filter_map(|_| kappa_point(&(0..all.len()).map(|_| all[rng.below(all.len())]).collect::<Vec<_>>()).map(|x| x.0)).collect();
+    boots.sort_by(|a, b| a.total_cmp(b));
+    let (lo, hi) = if all.len() < 2 || boots.is_empty() { (-1.0, 1.0) } else { (percentile(&boots, 0.025), percentile(&boots, 0.975)) };
+    Some(Kappa { kappa: k, ci_low: lo, ci_high: hi, agreement: po, n: all.len() })
+}
+
 // ----------------------------------------------------------------- trigger
 
 pub const TRIGGER_METRICS: &[&str] = &["trigger_precision", "trigger_recall", "trigger_f1"];
@@ -737,6 +780,30 @@ mod tests {
         assert!((e.effect - 0.25).abs() < 1e-9 && e.units == 8, "{e:?}");
         let same: Vec<(TriggerTask, TriggerTask)> = perfect.iter().cloned().zip(perfect.iter().cloned()).collect();
         assert_eq!(trigger_effect(&same, "trigger_f1", 1).unwrap().verdict, Verdict::NoHeadroom);
+    }
+
+    #[test]
+    fn kappa_on_hand_built_votes() {
+        let votes = |pairs: &[(&str, &str)], times: usize| -> Vec<(String, String)> { pairs.iter().cycle().take(pairs.len() * times).map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        // Perfect agreement.
+        let k = kappa(&votes(&[("lo", "lo"), ("hi", "hi")], 10), 1).unwrap();
+        assert!((k.kappa - 1.0).abs() < 1e-9 && k.agreement == 1.0 && k.ci_low > 0.99, "{k:?}");
+        // Chance: the judge's vote is independent of the human's.
+        let k = kappa(&votes(&[("lo", "lo"), ("lo", "hi"), ("hi", "lo"), ("hi", "hi")], 10), 1).unwrap();
+        assert!(k.kappa.abs() < 1e-9 && k.agreement == 0.5 && k.ci_low < 0.0 && k.ci_high > 0.0, "{k:?}");
+        // Systematic disagreement is below chance.
+        let k = kappa(&votes(&[("lo", "hi"), ("hi", "lo")], 10), 1).unwrap();
+        assert!((k.kappa + 1.0).abs() < 1e-9 && k.ci_high < 0.0, "{k:?}");
+        // A judge that ties where the human decides agrees with nothing.
+        let k = kappa(&votes(&[("lo", "tie"), ("hi", "tie")], 5), 1).unwrap();
+        assert!(k.kappa.abs() < 1e-9 && k.agreement == 0.0);
+        // Few pairs: the interval is wide; one pair says nothing.
+        let few = kappa(&votes(&[("lo", "lo"), ("hi", "hi"), ("lo", "hi")], 1), 1).unwrap();
+        let many = kappa(&votes(&[("lo", "lo"), ("hi", "hi"), ("lo", "hi")], 30), 1).unwrap();
+        assert!(few.ci_high - few.ci_low > 2.0 * (many.ci_high - many.ci_low), "{few:?} vs {many:?}");
+        let one = kappa(&votes(&[("lo", "lo")], 1), 1).unwrap();
+        assert_eq!((one.ci_low, one.ci_high), (-1.0, 1.0));
+        assert!(kappa::<String, String>(&[], 1).is_none());
     }
 
     #[test]

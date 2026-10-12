@@ -146,6 +146,17 @@ Every grader takes an optional `name`. Give a fixture a `.gitignore` for build d
 
 Every grader takes an optional `name`. The baseline commit is tagged `wrangler-baseline`, so a command grader can check `git diff --quiet wrangler-baseline -- tests`.
 
+## Judge calibration
+
+The pairwise judge checks itself for position bias, but only a person can say whether it picks what a person would. Every human vote in Review lands on a pair, and where the judge voted on the same pair the two are compared.
+
+The report's calibration section gives, overall and per task tag: the number of pairs with both votes, raw agreement, Cohen's kappa with a bootstrap interval, agreement restricted to pairs where the judge was consistent across orders, and how often the higher rubric score went to the result the person picked (which says whether the 1 to 10 scores track preference, or only the pairwise votes do). Human ties and skips are left out; "both bad" votes are counted on their own, since a high rate says something about the task. Fewer than eight pairs reads "not enough human votes to calibrate".
+
+- `wrangler review <launch> --for calibration` (and the Review page's "Calibrate the judge" mode) serves pairs that have a judge vote, spread over tasks and tags, the judge's shakiest calls first: pairs where it disagreed with itself, then pairs whose rubric scores are close. It never offers an unjudged pair while a judged one remains.
+- `wrangler calibration [--judge m] [--rubric r] [--tag t]` pools every judgment in the project's database by judge model and rubric and prints the same table.
+- Advice uses it. Where agreement is below 70%, or there are too few votes, every suggestion that rests on `judge_score` drops one confidence step and says so; a suggestion about named tasks is held to those tasks' tags, one about the whole launch to the overall figure. `calibrate_judge` says how many more pairs reach eight per tag.
+- A suite stores the calibration beside each baseline, so a diff on a judge-scored suite says whether the judge was trusted when each baseline was taken.
+
 ## Placebo overlays
 
 A measured gain from a skill or a `CLAUDE.md` may come from having instructions at all. `wrangler ablate <source> --placebo` adds a variant named `placebo` that tells the two apart: for a skill, the frontmatter is kept byte for byte (so it triggers the same way) and the body is replaced; for a `CLAUDE.md`, the whole file is replaced. The replacement has the same Markdown shape (a heading for each heading, a list item for each list item, a paragraph for each paragraph) and an estimated token count within ten percent of the original's.

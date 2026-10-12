@@ -317,6 +317,9 @@ pub struct Report {
     pub pairwise: Option<Pairwise>,
     pub ablation: Option<AblationReport>,
     pub trigger: Option<TriggerReport>,
+    /// How far the judge can be trusted here: its agreement with human
+    /// votes on the same pairs. Present when the launch has a judge.
+    pub calibration: Option<crate::calibration::Calibration>,
     pub events: EventCounts,
     pub warnings: Vec<String>,
 }
@@ -632,6 +635,10 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
     }
     let ablation = exp.ablation.as_ref().map(|meta| build_ablation(&data, meta, &primary));
     let trigger = build_trigger(&data, launch_id);
+    let calibration = exp.judge().map(|cfg| {
+        let pairs = crate::calibration::pairs_of(launch, &data.runs, &judgments, &data.metrics, None);
+        crate::calibration::from_pairs(&pairs, Some(cfg.model.clone()), cfg.rubric.clone(), seed("calibration"))
+    });
     let sum = |name: &str| data.metrics.values().filter_map(|m| m.get(name)).sum::<f64>() + 0.0;
 
     Ok(Report {
@@ -658,6 +665,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         pairwise,
         ablation,
         trigger,
+        calibration,
         events,
         warnings,
     })
@@ -1095,6 +1103,10 @@ pub fn render_text(r: &Report) -> String {
         }
     }
 
+    if let Some(c) = r.calibration.as_ref().filter(|c| c.overall.pairs + c.overall.rubric_pairs + c.overall.both_bad + c.overall.human_ties > 0) {
+        s.push_str(&format!("\nJUDGE CALIBRATION ({}; human votes against the judge on the same pairs)\n", c.judge_model.clone().unwrap_or_default()));
+        s.push_str(&crate::calibration::render_text(c));
+    }
     if let Some(t) = &r.trigger {
         s.push_str(&render_trigger_text(t));
     }

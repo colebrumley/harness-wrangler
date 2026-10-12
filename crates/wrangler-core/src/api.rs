@@ -322,7 +322,8 @@ impl Api {
             // ----------------------------------------------------- review
             "review_next" => {
                 let id = self.resolve(args)?;
-                json!({"item": review::next(s, id)?, "progress": review::progress(s, id)?})
+                let mode = review::Mode::parse(opt::<String>(args, "mode")?.as_deref())?;
+                json!({"item": review::next_for(s, id, mode)?, "progress": review::progress(s, id)?})
             }
             "review_vote" => json!(review::vote(s, arg(args, "launch_id")?, arg(args, "left_run")?, arg(args, "right_run")?, &arg::<String>(args, "choice")?, &opt::<String>(args, "reason")?.unwrap_or_default())?),
             "review_undo" => {
@@ -441,6 +442,8 @@ impl Api {
                 json!({"ok": true})
             }
             "suite_diff" => json!(suite::diff(p, s, &arg::<String>(args, "name")?, &arg::<String>(args, "model")?, opt::<String>(args, "previous")?.as_deref())?),
+
+            "calibration" => json!(crate::calibration::pooled(s, opt::<String>(args, "judge")?.as_deref(), opt::<String>(args, "rubric")?.as_deref(), opt::<String>(args, "tag")?.as_deref())?),
 
             // ----------------------------------------------------- advice
             "advice" => {

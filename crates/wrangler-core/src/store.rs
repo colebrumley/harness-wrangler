@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS baselines (
   experiment TEXT NOT NULL,
   launch_id INTEGER NOT NULL,
   created_at TEXT NOT NULL,
+  calibration_json TEXT NOT NULL DEFAULT 'null',
   PRIMARY KEY (suite, model, experiment)
 );
 "#;
@@ -226,6 +227,10 @@ pub struct Baseline {
     pub experiment: String,
     pub launch_id: i64,
     pub created_at: String,
+    /// The judge's calibration when this baseline was taken (see
+    /// `Calibration::summary`), or null.
+    #[serde(default)]
+    pub calibration: serde_json::Value,
 }
 
 pub fn now() -> String {
@@ -242,13 +247,28 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        Self::migrate(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
+    }
+
+    /// Additive migrations for databases created by earlier versions.
+    fn migrate(conn: &Connection) -> Result<()> {
+        let has = |table: &str, col: &str| -> Result<bool> {
+            let mut st = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let cols = st.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(cols.iter().any(|c| c == col))
+        };
+        if !has("baselines", "calibration_json")? {
+            conn.execute("ALTER TABLE baselines ADD COLUMN calibration_json TEXT NOT NULL DEFAULT 'null'", [])?;
+        }
+        Ok(())
     }
 
     pub fn in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        Self::migrate(&conn)?;
         Ok(Store { conn: Mutex::new(conn) })
     }
 
@@ -688,23 +708,30 @@ impl Store {
 
     // ----------------------------------------------------------- baselines
 
-    pub fn set_baseline(&self, suite: &str, model: &str, experiment: &str, launch_id: i64) -> Result<()> {
+    pub fn set_baseline(&self, suite: &str, model: &str, experiment: &str, launch_id: i64, calibration: &serde_json::Value) -> Result<()> {
         // A model keeps the date it first joined the suite, so rerunning an
         // older model does not reorder "previous model" comparisons.
         let c = self.c();
         let first: Option<String> = c.query_row("SELECT MIN(created_at) FROM baselines WHERE suite = ?1 AND model = ?2", params![suite, model], |r| r.get(0))?;
         c.execute(
-            "INSERT OR REPLACE INTO baselines (suite, model, experiment, launch_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![suite, model, experiment, launch_id, first.unwrap_or_else(now)],
+            "INSERT OR REPLACE INTO baselines (suite, model, experiment, launch_id, created_at, calibration_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![suite, model, experiment, launch_id, first.unwrap_or_else(now), calibration.to_string()],
         )?;
+        Ok(())
+    }
+
+    /// Update the calibration stored beside a baseline (human votes arrive after the run).
+    pub fn set_baseline_calibration(&self, suite: &str, model: &str, experiment: &str, calibration: &serde_json::Value) -> Result<()> {
+        self.c().execute("UPDATE baselines SET calibration_json = ?4 WHERE suite = ?1 AND model = ?2 AND experiment = ?3", params![suite, model, experiment, calibration.to_string()])?;
         Ok(())
     }
 
     pub fn baselines(&self, suite: &str) -> Result<Vec<Baseline>> {
         let c = self.c();
-        let mut stmt = c.prepare("SELECT suite, model, experiment, launch_id, created_at FROM baselines WHERE suite = ?1 ORDER BY created_at, model")?;
+        let mut stmt = c.prepare("SELECT suite, model, experiment, launch_id, created_at, calibration_json FROM baselines WHERE suite = ?1 ORDER BY created_at, model")?;
         let rows = stmt.query_map([suite], |r| {
-            Ok(Baseline { suite: r.get(0)?, model: r.get(1)?, experiment: r.get(2)?, launch_id: r.get(3)?, created_at: r.get(4)? })
+            let cal: String = r.get(5)?;
+            Ok(Baseline { suite: r.get(0)?, model: r.get(1)?, experiment: r.get(2)?, launch_id: r.get(3)?, created_at: r.get(4)?, calibration: serde_json::from_str(&cal).unwrap_or(serde_json::Value::Null) })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }

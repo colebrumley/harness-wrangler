@@ -4,6 +4,7 @@
 pub mod ablation;
 pub mod advice;
 pub mod api;
+pub mod calibration;
 pub mod graders;
 pub mod interop;
 pub mod isolation;

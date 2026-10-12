@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Ctx } from "../App";
-import { Comparison, Report, Summary, TriggerReport, fmtDelta, fmtValue, info, remember, usd } from "../api";
+import { Calibration, CalibrationRow, Comparison, Report, Summary, TriggerReport, fmtDelta, fmtValue, info, remember, usd } from "../api";
 import { Empty, ErrorNote, Forest, MeanBar, Panel, Seg, VerdictMark, equivalenceBand } from "../components";
 import { useLoad } from "../hooks";
 
@@ -186,8 +186,49 @@ export default function Results({ ctx }: { ctx: Ctx }) {
 
         {r.trigger && <TriggerPanel t={r.trigger} />}
         {r.pairwise && <PairwisePanel p={r.pairwise} />}
+        {r.calibration && <CalibrationPanel c={r.calibration} launchId={r.launch_id} />}
       </div>
     </div>
+  );
+}
+
+/** How far the judge can be trusted here: its agreement with your votes on the same pairs, by task tag. */
+function CalibrationPanel({ c, launchId }: { c: Calibration; launchId: number }) {
+  const rows = [c.overall, ...c.by_tag];
+  const voted = c.overall.pairs + c.overall.rubric_pairs + c.overall.human_ties + c.overall.both_bad > 0;
+  const pct = (x: number | null) => (x === null || x === undefined ? "–" : `${Math.round(x * 100)}%`);
+  const status = (r: CalibrationRow) => r.status === "calibrated" ? <span className="chip good">trusted</span> : r.status === "low" ? <span className="chip bad">low agreement</span> : <span className="chip warn" title="Fewer than eight pairs with both a human and a judge vote">{r.pairs_needed} more to calibrate</span>;
+  return (
+    <Panel title="Judge calibration" sub={`Does ${c.judge_model ?? "the judge"} pick what you pick? Agreement on pairs you both voted on, leaving out your ties and "both bad" votes. Eight pairs is the minimum to say.`}
+      actions={<a className="btn" style={{ textDecoration: "none" }} href={`#/review/${launchId}`} onClick={() => localStorage.setItem("review.mode", "calibration")}>Review for calibration</a>} flush>
+      {!voted ? <p className="muted" style={{ padding: "12px 16px" }}>No human votes yet, so nothing says whether this judge can be trusted on these tasks. Advice that rests on the judge is marked down until there are.</p> : (
+        <div className="scrollx">
+          <table className="grid">
+            <thead><tr>
+              <th>Tasks</th><th className="num">Pairs</th><th className="num">Agreement</th>
+              <th className="num" title="Cohen's kappa: 1 is perfect agreement, 0 is what chance would give, below 0 is worse than chance. With a 95% bootstrap interval.">Kappa</th>
+              <th className="num" title="Agreement on the pairs where the judge picked the same result in both orders">When the judge is consistent</th>
+              <th className="num" title="How often the higher 1 to 10 rubric score went to the result you picked">Rubric scores track you</th>
+              <th className="num">Both bad</th><th>Verdict</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.scope}>
+                  <td>{r.scope === "all" ? <b>All tasks</b> : <span className="tag">{r.scope}</span>}</td>
+                  <td className="num">{r.pairs}</td>
+                  <td className="num">{pct(r.agreement)}</td>
+                  <td className="num">{r.kappa === null ? "–" : <>{r.kappa.toFixed(2)} <span className="faint small">[{(r.kappa_ci_low ?? 0).toFixed(2)}, {(r.kappa_ci_high ?? 0).toFixed(2)}]</span></>}</td>
+                  <td className="num">{pct(r.consistent_agreement)} <span className="faint small">({r.consistent_pairs})</span></td>
+                  <td className="num">{pct(r.rubric_agreement)} <span className="faint small">({r.rubric_pairs})</span></td>
+                  <td className="num">{r.both_bad}</td>
+                  <td>{status(r)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
   );
 }
 

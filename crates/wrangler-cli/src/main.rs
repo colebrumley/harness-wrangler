@@ -12,7 +12,7 @@ use std::sync::Arc;
 use wrangler_core::ablation::{self, AblationRequest};
 use wrangler_core::project::Suite;
 use wrangler_core::scheduler::{self, Event, RunOptions};
-use wrangler_core::{advice, interop, report, review, runner, stats, suite, trigger, Project, Store};
+use wrangler_core::{advice, calibration, interop, report, review, runner, stats, suite, trigger, Project, Store};
 
 #[derive(Parser)]
 #[command(name = "wrangler", version, about = "Controlled experiments over coding-agent harness patterns")]
@@ -185,6 +185,36 @@ enum Cmd {
     },
     /// Human review annotations grouped by variant, for agents to read.
     Annotations { launch: String },
+    /// How often the judge agrees with human votes, pooled over every launch
+    /// in this project, by judge model, rubric and task tag.
+    Calibration {
+        /// Only this judge model.
+        #[arg(long)]
+        judge: Option<String>,
+        /// Only this rubric file.
+        #[arg(long)]
+        rubric: Option<String>,
+        /// Only tasks with this tag.
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Blind pairwise review from the terminal: show the next pair, or record a vote.
+    Review {
+        launch: String,
+        /// `calibration`: prefer pairs the judge voted on, its shakiest calls first.
+        #[arg(long = "for")]
+        purpose: Option<String>,
+        /// Record a vote on a pair instead of showing the next one: left, right, tie, both_bad or skip.
+        #[arg(long)]
+        vote: Option<String>,
+        /// Run shown on the left (from the pair that was printed).
+        #[arg(long, requires = "vote")]
+        left: Option<i64>,
+        #[arg(long, requires = "vote")]
+        right: Option<i64>,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
     /// Import tasks from another format.
     Import {
         #[command(subcommand)]
@@ -760,6 +790,53 @@ fn real_main(cli: Cli) -> Result<()> {
                     }
                 }
             }
+        }
+        Cmd::Calibration { judge, rubric, tag } => {
+            let pooled = calibration::pooled(&store, judge.as_deref(), rubric.as_deref(), tag.as_deref())?;
+            if json {
+                return print_json(&pooled);
+            }
+            if pooled.is_empty() {
+                println!("no human votes on judged launches yet. Review some pairs first: wrangler review <launch> --for calibration");
+            }
+            for p in &pooled {
+                println!("judge {} · rubric {} · launches {}", p.judge_model, p.rubric.as_deref().unwrap_or("(none)"), p.launches.iter().map(|l| format!("#{l}")).collect::<Vec<_>>().join(", "));
+                println!("{}", calibration::render_text(&p.calibration));
+            }
+        }
+        Cmd::Review { launch, purpose, vote, left, right, reason } => {
+            let id = store.resolve_launch(&launch)?;
+            let mode = review::Mode::parse(purpose.as_deref())?;
+            if let Some(choice) = vote {
+                let (Some(l), Some(r)) = (left, right) else { bail!("--vote needs --left <run> and --right <run> from the pair that was shown") };
+                let reveal = review::vote(&store, id, l, r, &choice, &reason)?;
+                if json {
+                    return print_json(&reveal);
+                }
+                println!("recorded. left was \"{}\", right was \"{}\"", reveal.left_variant, reveal.right_variant);
+                if let Some(j) = &reveal.judge {
+                    println!("the judge picked: {j}{}", if reveal.judge_consistent == Some(false) { " (it disagreed with itself across orders)" } else { "" });
+                }
+                return Ok(());
+            }
+            let item = review::next_for(&store, id, mode)?;
+            if json {
+                return print_json(&json!({"item": item, "progress": review::progress(&store, id)?}));
+            }
+            let Some(item) = item else {
+                println!("nothing left to review in launch #{id}");
+                return Ok(());
+            };
+            let clip = |s: &str| wrangler_core::util::truncate_middle(s.trim(), 3000);
+            println!("task {} ({} vote(s) cast in this launch; why this pair: {})\n", item.task_id, item.progress.votes, item.why.join(", "));
+            println!("PROMPT\n{}\n", item.task_prompt.trim());
+            for (name, side) in [("LEFT", &item.left), ("RIGHT", &item.right)] {
+                println!("===== {name} (run {}) =====\n{}\n", side.run_id, clip(&side.output));
+                if !side.diff.trim().is_empty() {
+                    println!("--- other files changed ---\n{}\n", clip(&side.diff));
+                }
+            }
+            println!("vote: wrangler review {id} --vote left|right|tie|both_bad|skip --left {} --right {} [--reason \"...\"]", item.left.run_id, item.right.run_id);
         }
         Cmd::Import { cmd: ImportCmd::SkillCreator { evals_json, skill_root } } => {
             let written = interop::import_skill_creator(&project, &evals_json, skill_root.as_deref())?;

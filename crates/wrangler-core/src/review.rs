@@ -36,7 +36,7 @@ pub struct ReviewItem {
     pub left: Side,
     pub right: Side,
     /// Why this pair was chosen, without naming variants:
-    /// undecided_comparison | task_unreviewed | judge_inconsistent
+    /// undecided_comparison | task_unreviewed | judge_inconsistent | calibration
     pub why: Vec<String>,
     pub progress: Progress,
 }
@@ -78,6 +78,34 @@ struct Candidate {
     /// Human votes and skips already recorded on this task, any variants.
     task_votes: usize,
     task_skips: usize,
+    /// Calibration mode: does the pairwise judge have a vote on this pair,
+    /// did it disagree with itself across orders, how far apart are the two
+    /// rubric scores, and how many human votes the task's least-reviewed tag has.
+    has_judge: bool,
+    inconsistent: bool,
+    score_gap: Option<f64>,
+    tag_votes: usize,
+}
+
+/// What the queue is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Settle the comparison with the fewest reviews.
+    #[default]
+    Compare,
+    /// Check the judge against a person: pairs the judge voted on, spread
+    /// over tasks and tags, the judge's shakiest calls first.
+    Calibration,
+}
+
+impl Mode {
+    pub fn parse(s: Option<&str>) -> Result<Mode> {
+        match s {
+            None | Some("") | Some("compare") | Some("default") => Ok(Mode::Compare),
+            Some("calibration") => Ok(Mode::Calibration),
+            Some(other) => bail!("unknown review mode `{other}` (try `calibration`)"),
+        }
+    }
 }
 
 struct Queue {
@@ -95,7 +123,7 @@ fn uncertainty(wins_i: f64, wins_j: f64) -> f64 {
     (-z * z / 2.0).exp()
 }
 
-fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queue {
+fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment], scores: &HashMap<i64, f64>) -> Queue {
     let variants = &launch.variants;
     let vidx: HashMap<i64, usize> = runs.iter().filter_map(|r| Some((r.id, variants.iter().position(|v| v.key == r.variant_key)?))).collect();
     let by_id: HashMap<i64, &RunRow> = runs.iter().map(|r| (r.id, r)).collect();
@@ -108,6 +136,9 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
     let mut voted_on_task: HashMap<String, usize> = HashMap::new();
     let mut skipped_on_task: HashMap<String, usize> = HashMap::new();
     let mut judge_inconsistent: HashMap<(i64, i64), ()> = HashMap::new();
+    let mut judge_voted: HashMap<(i64, i64), ()> = HashMap::new();
+    let mut voted_on_tag: HashMap<String, usize> = HashMap::new();
+    let tags_of = |task: &str| launch.tasks.iter().find(|t| t.id == task).map(|t| t.tags.clone()).unwrap_or_default();
     let mut progress = Progress::default();
     for j in judgments {
         let (Some(&ia), Some(&ib)) = (vidx.get(&j.run_a), vidx.get(&j.run_b)) else { continue };
@@ -120,9 +151,15 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
             }
             progress.votes += 1;
             *voted_on_task.entry(j.task_id.clone()).or_default() += 1;
+            for tag in tags_of(&j.task_id) {
+                *voted_on_tag.entry(tag).or_default() += 1;
+            }
             *task_votes.entry((j.task_id.clone(), ia.min(ib), ia.max(ib))).or_default() += 1.0;
-        } else if j.consistent == Some(false) {
-            judge_inconsistent.insert(pair_key(j.run_a, j.run_b), ());
+        } else {
+            judge_voted.insert(pair_key(j.run_a, j.run_b), ());
+            if j.consistent == Some(false) {
+                judge_inconsistent.insert(pair_key(j.run_a, j.run_b), ());
+            }
         }
         let weight = if j.source == "human" { 1.0 } else { 0.5 };
         let (lo, hi, lo_is_a) = if ia < ib { (ia, ib, true) } else { (ib, ia, false) };
@@ -182,7 +219,13 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
                     }
                     progress.total_remaining += 1;
                     let on_task = |m: &HashMap<String, usize>| m.get(&t.id).copied().unwrap_or(0);
-                    candidates.push((Candidate { task: t.id.clone(), a: ra.id, b: rb.id, vi: i, vj: j, task_votes: on_task(&voted_on_task), task_skips: on_task(&skipped_on_task) }, priority, why));
+                    let tag_votes = t.tags.iter().map(|tag| voted_on_tag.get(tag).copied().unwrap_or(0)).min().unwrap_or_else(|| on_task(&voted_on_task));
+                    let score_gap = scores.get(&ra.id).zip(scores.get(&rb.id)).map(|(x, y)| (x - y).abs());
+                    candidates.push((
+                        Candidate { task: t.id.clone(), a: ra.id, b: rb.id, vi: i, vj: j, task_votes: on_task(&voted_on_task), task_skips: on_task(&skipped_on_task), has_judge: judge_voted.contains_key(&pair_key(ra.id, rb.id)), inconsistent, score_gap, tag_votes },
+                        priority,
+                        why,
+                    ));
                 }
             }
         }
@@ -198,25 +241,47 @@ fn build_queue(launch: &Launch, runs: &[RunRow], judgments: &[Judgment]) -> Queu
     Queue { candidates, progress }
 }
 
+fn rubric_scores(store: &Store, launch_id: i64) -> Result<HashMap<i64, f64>> {
+    Ok(store.metrics_for_launch(launch_id)?.into_iter().filter_map(|(id, m)| Some((id, *m.get("judge_score")?))).collect())
+}
+
 pub fn progress(store: &Store, launch_id: i64) -> Result<Progress> {
     let launch = store.launch(launch_id)?;
-    Ok(build_queue(&launch, &store.runs(launch_id)?, &store.judgments(launch_id, None)?).progress)
+    Ok(build_queue(&launch, &store.runs(launch_id)?, &store.judgments(launch_id, None)?, &rubric_scores(store, launch_id)?).progress)
 }
 
 /// The next pair to review, or `None` when the queue is empty.
 pub fn next(store: &Store, launch_id: i64) -> Result<Option<ReviewItem>> {
+    next_for(store, launch_id, Mode::Compare)
+}
+
+/// The next pair for the given purpose.
+pub fn next_for(store: &Store, launch_id: i64, mode: Mode) -> Result<Option<ReviewItem>> {
     let launch = store.launch(launch_id)?;
     let runs = store.runs(launch_id)?;
-    let queue = build_queue(&launch, &runs, &store.judgments(launch_id, None)?);
-    // Tasks with no vote come first, and among those the ones not yet skipped,
-    // so no prompt comes round again while another is still waiting.
-    let best = queue.candidates.iter().max_by(|x, y| {
-        (y.0.task_votes, y.0.task_skips)
-            .cmp(&(x.0.task_votes, x.0.task_skips))
-            .then_with(|| x.1.total_cmp(&y.1))
-            .then_with(|| hash_u64(&format!("{}|{}", x.0.a, x.0.b)).cmp(&hash_u64(&format!("{}|{}", y.0.a, y.0.b))))
+    let queue = build_queue(&launch, &runs, &store.judgments(launch_id, None)?, &rubric_scores(store, launch_id)?);
+    let tiebreak = |c: &Candidate| hash_u64(&format!("{}|{}", c.a, c.b));
+    let best = queue.candidates.iter().max_by(|x, y| match mode {
+        // Tasks with no vote come first, and among those the ones not yet skipped,
+        // so no prompt comes round again while another is still waiting.
+        Mode::Compare => (y.0.task_votes, y.0.task_skips).cmp(&(x.0.task_votes, x.0.task_skips)).then_with(|| x.1.total_cmp(&y.1)).then_with(|| tiebreak(&x.0).cmp(&tiebreak(&y.0))),
+        // A pair the judge voted on always beats one it did not. Then the
+        // least-reviewed tag and task, then the judge's shakiest calls:
+        // inconsistent across orders, or two rubric scores close together.
+        Mode::Calibration => x
+            .0
+            .has_judge
+            .cmp(&y.0.has_judge)
+            .then_with(|| (y.0.tag_votes, y.0.task_votes, y.0.task_skips).cmp(&(x.0.tag_votes, x.0.task_votes, x.0.task_skips)))
+            .then_with(|| x.0.inconsistent.cmp(&y.0.inconsistent))
+            .then_with(|| y.0.score_gap.unwrap_or(f64::MAX).total_cmp(&x.0.score_gap.unwrap_or(f64::MAX)))
+            .then_with(|| tiebreak(&x.0).cmp(&tiebreak(&y.0))),
     });
     let Some((cand, _, why)) = best else { return Ok(None) };
+    let mut why = why.clone();
+    if mode == Mode::Calibration && cand.has_judge {
+        why.push("calibration".to_string());
+    }
     let _ = (cand.vi, cand.vj);
     let task = launch.tasks.iter().find(|t| t.id == cand.task).unwrap();
     let side = |id: i64| -> Result<Side> {
@@ -236,7 +301,7 @@ pub fn next(store: &Store, launch_id: i64) -> Result<Option<ReviewItem>> {
         task_votes: cand.task_votes,
         left: side(l)?,
         right: side(r)?,
-        why: why.clone(),
+        why,
         progress: queue.progress,
     }))
 }

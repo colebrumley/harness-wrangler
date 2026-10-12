@@ -317,3 +317,111 @@ fn example_rfw_trigger_corpus_is_nontrivial_under_the_mock() {
     }
     assert_eq!(t.by_model.len(), 2, "one row per model");
 }
+
+/// Judge calibration: scripted human votes agree with the judge on two tags
+/// and disagree on a third. The report shows the split, the calibration
+/// queue serves judged pairs first, and advice is downgraded where the
+/// judge is not trusted.
+#[test]
+fn judge_calibration_by_tag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = common::project(tmp.path());
+    for (id, tag) in [("alpha", "summaries"), ("bravo", "emails"), ("charlie", "code")] {
+        let path = tmp.path().join(format!("tasks/{id}.toml"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replacen("expected_output", &format!("tags = [\"{tag}\"]\nexpected_output"), 1)).unwrap();
+    }
+    let store = Store::open(&project.db_path()).unwrap();
+    let exp = project.load_experiment("demo").unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), no_cancel(), &|_| {}).unwrap();
+
+    // Before any human vote: nothing to calibrate on, and advice says how many pairs it takes.
+    let rep = report::build(&store, launch, None).unwrap();
+    assert_eq!(rep.calibration.as_ref().unwrap().overall.status, "not_enough");
+    let adv = advice::build(&store, launch, None).unwrap();
+    let cal = adv.iter().find(|s| s.kind == "calibrate_judge").expect("calibrate_judge");
+    assert_eq!((cal.priority, cal.evidence["pairs_needed"].as_u64()), (2, Some(24)), "{}", cal.action);
+    assert!(adv.iter().filter(|s| s.metric == "judge_score").all(|s| s.action.contains("The judge is not calibrated on these tasks")));
+
+    let judge_votes = store.judgments(launch, Some("judge")).unwrap();
+    let judged = |a: i64, b: i64| judge_votes.iter().find(|j| (j.run_a, j.run_b) == (a, b) || (j.run_a, j.run_b) == (b, a));
+    let tag_of = |task: &str| match task {
+        "alpha" => "summaries",
+        "bravo" => "emails",
+        _ => "code",
+    };
+    let mut offered = 0;
+    for _ in 0..200 {
+        let c = wrangler_core::calibration::for_launch(&store, launch).unwrap();
+        if ["summaries", "emails", "code"].iter().all(|t| c.tag(t).map(|r| r.pairs >= 8).unwrap_or(false)) {
+            break;
+        }
+        let item = review::next_for(&store, launch, review::Mode::Calibration).unwrap().expect("pairs remain");
+        // Calibration mode never offers an unjudged pair while a judged one remains.
+        let j = judged(item.left.run_id, item.right.run_id).unwrap_or_else(|| panic!("pair {} of the calibration queue has no judge vote", offered + 1));
+        assert!(item.why.iter().any(|w| w == "calibration"));
+        offered += 1;
+        let judge_side = match (j.winner.as_str(), j.run_a == item.left.run_id) {
+            ("a", true) | ("b", false) => "left",
+            ("b", true) | ("a", false) => "right",
+            _ => "tie",
+        };
+        let agree = tag_of(&item.task_id) != "code";
+        let choice = match (judge_side, agree) {
+            ("tie", true) => "tie",
+            ("tie", false) => "left",
+            (side, true) => side,
+            ("left", false) => "right",
+            (_, false) => "left",
+        };
+        review::vote(&store, launch, item.left.run_id, item.right.run_id, choice, "").unwrap();
+    }
+    assert!(offered >= 24, "the queue spread over the three tags: {offered} votes");
+
+    let rep = report::build(&store, launch, None).unwrap();
+    let c = rep.calibration.as_ref().unwrap();
+    let (s, e, code) = (c.tag("summaries").unwrap(), c.tag("emails").unwrap(), c.tag("code").unwrap());
+    assert_eq!((s.status.as_str(), s.agreement, e.status.as_str(), e.agreement), ("calibrated", Some(1.0), "calibrated", Some(1.0)));
+    assert_eq!((code.status.as_str(), code.agreement), ("low", Some(0.0)));
+    assert!(code.kappa.unwrap() < 0.0 && s.kappa.unwrap() > 0.9);
+    assert!(s.rubric_pairs > 0 && s.rubric_agreement.unwrap() > code.rubric_agreement.unwrap());
+    let text = report::render_text(&rep);
+    assert!(text.contains("JUDGE CALIBRATION") && text.contains("low agreement"), "{text}");
+
+    // Suggestions about one tag's tasks follow that tag's calibration: only `code` is downgraded.
+    let about = |task: &str| advice::Suggestion {
+        id: String::new(),
+        kind: "flaky_task".into(),
+        priority: 6,
+        action: format!("Task {task} is flaky."),
+        target: serde_json::json!({"type": "tasks", "tasks": [task]}),
+        metric: "judge_score".into(),
+        evidence: serde_json::json!({}),
+        confidence: "high".into(),
+    };
+    let mut scoped = vec![about("alpha"), about("bravo"), about("charlie")];
+    scoped.push(advice::Suggestion { metric: "pass".into(), ..about("charlie") });
+    let tasks = store.launch(launch).unwrap().tasks;
+    advice::apply_calibration(&mut scoped, c, &tasks);
+    assert_eq!(scoped.iter().map(|s| s.confidence.as_str()).collect::<Vec<_>>(), vec!["high", "high", "medium", "high"]);
+    assert!(scoped[2].action.contains("The judge is not calibrated on these tasks tagged `code` (agreement 0%"), "{}", scoped[2].action);
+    assert_eq!(scoped[0].action, "Task alpha is flaky.");
+    assert_eq!(scoped[2].evidence["judge_calibration"]["untrusted"], serde_json::json!(["code"]));
+
+    let adv = advice::build(&store, launch, None).unwrap();
+    let cal = adv.iter().find(|s| s.kind == "calibrate_judge").expect("calibrate_judge names the untrusted tag");
+    assert!(cal.action.contains("on `code` tasks") && !cal.action.contains("`emails`"), "{}", cal.action);
+
+    // Pooled across launches by judge model, with a tag filter.
+    let pooled = wrangler_core::calibration::pooled(&store, Some("mock"), None, Some("code")).unwrap();
+    assert_eq!((pooled.len(), pooled[0].launches.clone(), pooled[0].calibration.overall.status.as_str()), (1, vec![launch], "low"));
+    assert!(wrangler_core::calibration::pooled(&store, Some("other-model"), None, None).unwrap().is_empty());
+
+    // A suite baseline carries the calibration it was taken under.
+    project.save_suite(&Suite { name: "cal".into(), description: String::new(), primary_metric: "judge_score".into(), experiments: vec!["demo".into()] }).unwrap();
+    store.set_baseline("cal", "mock-model", "demo", launch, &serde_json::Value::Null).unwrap();
+    let dash = suite::dashboard(&project, &store, "cal").unwrap();
+    assert_eq!(dash.rows[0].cells[0].judge_calibration["status"], "low");
+    assert_eq!(store.baselines("cal").unwrap()[0].calibration["untrusted_tags"], serde_json::json!(["code"]));
+}

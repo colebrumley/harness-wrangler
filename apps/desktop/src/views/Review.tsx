@@ -8,6 +8,7 @@ const WHY: Record<string, string> = {
   undecided_comparison: "this comparison is still undecided",
   task_unreviewed: "it has no vote on this task yet",
   judge_inconsistent: "the LLM judge changed its mind when the order was swapped",
+  calibration: "the judge has voted on it, so your vote checks the judge",
 };
 type Choice = "left" | "right" | "tie" | "both_bad" | "skip";
 
@@ -27,6 +28,9 @@ export default function Review({ ctx }: { ctx: Ctx }) {
   const [loaded, setLoaded] = useState(false);
   const [show, setShow] = useState<"output" | "diff">("output");
   const [auto, setAuto] = useState(() => localStorage.getItem("review.auto") === "1");
+  // Calibration mode serves pairs the judge has voted on, its shakiest calls first.
+  const [mode, setModeState] = useState<"compare" | "calibration">(() => (localStorage.getItem("review.mode") === "calibration" ? "calibration" : "compare"));
+  const setMode = (m: "compare" | "calibration") => { localStorage.setItem("review.mode", m); setModeState(m); };
   // Past the starter set, reviewing is opt-in.
   const [more, setMore] = useState(false);
   useEffect(() => setMore(false), [id]);
@@ -35,12 +39,12 @@ export default function Review({ ctx }: { ctx: Ctx }) {
   const load = useCallback(async () => {
     if (!id) return;
     try {
-      const r = await call("review_next", { launch_id: id });
+      const r = await call("review_next", { launch_id: id, mode });
       setItem(r.item); setProgress(r.progress); setReveal(null); setVoted(null); setReason(""); setError(null);
       setShow(r.item && !r.item.left.output.trim() && r.item.left.diff ? "diff" : "output");
     } catch (e: any) { setError(String(e.message ?? e)); }
     setLoaded(true);
-  }, [id]);
+  }, [id, mode]);
   useEffect(() => { setLoaded(false); setItem(null); load(); }, [load]);
 
   const vote = useCallback(async (choice: Choice) => {
@@ -98,7 +102,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
     );
   }
 
-  if (!more && !voted && progress && progress.recommended > 0 && progress.recommended_left === 0) {
+  if (!more && mode === "compare" && !voted && progress && progress.recommended > 0 && progress.recommended_left === 0) {
     return (
       <div className="content">
         <Empty title={`Starter set done: ${progress.votes} pair${progress.votes === 1 ? "" : "s"} reviewed`}>
@@ -109,6 +113,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
           <div className="row" style={{ justifyContent: "center" }}>
             <a className="btn primary" style={{ textDecoration: "none" }} href={`#/results/${id}`}>See the results</a>
             <button className="btn" onClick={() => setMore(true)}>Review more pairs</button>
+            <button className="btn" onClick={() => setMode("calibration")} title="Review pairs the judge has voted on, to see whether it can be trusted on these tasks">Calibrate the judge</button>
           </div>
         </Empty>
       </div>
@@ -147,7 +152,9 @@ export default function Review({ ctx }: { ctx: Ctx }) {
               <div className="row wrap">
                 <h2>{item.task_id}</h2>
                 <span className="muted small">
-                  {progress.recommended_left > 0
+                  {mode === "calibration"
+                    ? `Calibrating the judge: ${progress.votes} reviewed. Eight pairs per task tag is the minimum; Results shows the agreement.`
+                    : progress.recommended_left > 0
                     ? `Task ${progress.recommended - progress.recommended_left + 1} of ${progress.recommended} in the starter set: one pair per task, chosen to settle the most. About a minute each.`
                     : `${progress.votes} reviewed. Past the starter set; stop whenever you like.`}
                 </span>
@@ -156,6 +163,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
               {item.expected_output && <p className="muted small">Expected: {item.expected_output}</p>}
             </div>
             <div className="row">
+              <Seg options={[["compare", "Settle the comparison"], ["calibration", "Calibrate the judge"]]} value={mode} onChange={setMode} />
               {hasDiff && <Seg options={[["output", item.output_file ?? "Final message"], ["diff", "Other changes"]]} value={show} onChange={setShow} />}
             </div>
           </div>

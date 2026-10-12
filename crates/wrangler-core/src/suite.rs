@@ -56,7 +56,7 @@ pub fn run_model(project: &Project, store: &Store, suite_name: &str, model: &str
         let (id, _) = scheduler::create_launch(project, store, exp, Some(suite_name), &format!("suite {suite_name} on {model}"))?;
         scheduler::execute(project, store, id, opts, cancel.clone(), sink)?;
         if store.launch(id)?.status == "done" {
-            store.set_baseline(suite_name, model, &exp.name, id)?;
+            store.set_baseline(suite_name, model, &exp.name, id, &crate::calibration::for_launch(store, id)?.summary())?;
         }
         launches.push(id);
     }
@@ -76,6 +76,10 @@ pub struct ModelCell {
     /// Effect on this model minus effect on the previous model.
     pub change_vs_prev: Option<f64>,
     pub prev_model: Option<String>,
+    /// The judge's calibration recorded with this baseline: status
+    /// (calibrated | low | not_enough), agreement and pairs. Null without a judge.
+    #[serde(default)]
+    pub judge_calibration: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +131,17 @@ pub fn dashboard(project: &Project, store: &Store, suite_name: &str) -> Result<D
                 missing.push(format!("{exp_name} on {model}: launch #{} no longer exists", b.launch_id));
                 continue;
             };
+            // Human votes come in after the suite run, so the stored figure is
+            // brought up to date while the launch still exists.
+            let mut calibration = b.calibration.clone();
+            if data.launch.def.judge().is_some() {
+                if let Ok(now) = crate::calibration::for_launch(store, b.launch_id).map(|c| c.summary()) {
+                    if now != calibration {
+                        let _ = store.set_baseline_calibration(suite_name, model, exp_name, &now);
+                        calibration = now;
+                    }
+                }
+            }
             let Ok((factor, base)) = overlay_factor(&data.launch.def) else { continue };
             for level in factor.levels.iter().skip(1).map(|l| l.label()) {
                 let effect = data.level_effect(&suite.primary_metric, &factor.name, &base, &level);
@@ -139,6 +154,7 @@ pub fn dashboard(project: &Project, store: &Store, suite_name: &str) -> Result<D
                     effect,
                     change_vs_prev: None,
                     prev_model: None,
+                    judge_calibration: calibration.clone(),
                 };
                 match exp_rows.iter_mut().find(|r| r.pattern == level) {
                     Some(r) => r.cells.push(cell),
@@ -247,13 +263,29 @@ pub fn diff(project: &Project, store: &Store, suite_name: &str, new_model: &str,
             pattern: row.pattern.clone(),
             category: category.into(),
             priority,
-            summary: format!("{lead}. {} on {new_model}: {}. Was {was}.", info.label, fmt(&new.effect)),
+            summary: format!("{lead}. {} on {new_model}: {}. Was {was}.{}", info.label, fmt(&new.effect), judge_note(&dash.suite.primary_metric, &new, prev.as_ref())),
             new,
             prev,
         });
     }
     items.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.experiment.cmp(&b.experiment)).then(a.pattern.cmp(&b.pattern)));
     Ok(ModelDiff { suite: suite_name.to_string(), primary_metric: dash.suite.primary_metric.clone(), new_model: new_model.to_string(), prev_model, items })
+}
+
+/// For judge-scored suites: was the judge trusted when each baseline was taken?
+fn judge_note(metric: &str, new: &ModelCell, prev: Option<&ModelCell>) -> String {
+    if metric != "judge_score" && metric != "expectations_passed" {
+        return String::new();
+    }
+    let word = |c: &ModelCell| match c.judge_calibration["status"].as_str() {
+        Some("calibrated") => format!("calibrated on {} ({:.0}% agreement over {} pairs)", c.model, c.judge_calibration["agreement"].as_f64().unwrap_or(0.0) * 100.0, c.judge_calibration["pairs"]),
+        Some("low") => format!("NOT trusted on {} ({:.0}% agreement over {} pairs)", c.model, c.judge_calibration["agreement"].as_f64().unwrap_or(0.0) * 100.0, c.judge_calibration["pairs"]),
+        _ => format!("not calibrated on {} (too few human votes)", c.model),
+    };
+    match prev {
+        Some(p) => format!(" Judge: {}; {}.", word(new), word(p)),
+        None => format!(" Judge: {}.", word(new)),
+    }
 }
 
 pub fn render_dashboard_text(d: &Dashboard) -> String {

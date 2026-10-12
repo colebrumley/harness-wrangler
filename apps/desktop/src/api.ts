@@ -52,8 +52,10 @@ export interface Report {
   launch_id: number; experiment: string; description: string; status: string; phase: string; created_at: string; def_hash: string; runs_per_cell: number;
   counts: Counts; cost_usd: number; judge_cost_usd: number; primary_metric: string; metrics: MetricInfo[];
   factors: { name: string; kind: string; levels: string[] }[]; variants: VariantSummary[]; comparisons: Comparison[]; conditional: Conditional[];
-  tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; trigger: TriggerReport | null; events: any; warnings: string[];
+  tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; trigger: TriggerReport | null; calibration: Calibration | null; events: any; warnings: string[];
 }
+export interface CalibrationRow { scope: string; pairs: number; agreement: number | null; kappa: number | null; kappa_ci_low: number | null; kappa_ci_high: number | null; consistent_pairs: number; consistent_agreement: number | null; rubric_pairs: number; rubric_agreement: number | null; human_ties: number; both_bad: number; status: "calibrated" | "low" | "not_enough"; pairs_needed: number }
+export interface Calibration { judge_model: string | null; rubric: string | null; overall: CalibrationRow; by_tag: CalibrationRow[] }
 export interface TriggerPrompt { task_id: string; prompt: string; fire_rate: number; runs: number }
 export interface TriggerRates { precision: Summary | null; recall: Summary | null; f1: Summary | null }
 export interface TriggerVariant extends TriggerRates { variant_key: string; label: string; model: string | null; should_tasks: number; should_not_tasks: number; false_negatives: TriggerPrompt[]; false_positives: TriggerPrompt[]; description: string | null }
