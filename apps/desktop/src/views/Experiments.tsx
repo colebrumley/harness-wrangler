@@ -263,11 +263,12 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
         {events.map((e, i) => <div key={i} className="note warn">{e.event === "rate_limited" ? `Rate limited on run ${e.run_id}: waiting ${e.wait_s}s before retry ${e.attempt}. ${e.detail}` : e.message}</div>)}
         <ErrorNote error={error ?? q.error} />
         <div className="scrollx">
-          <div className="cells" style={{ gridTemplateColumns: `minmax(140px, 1.2fr) repeat(${s.variants.length}, minmax(110px, 1fr))` }}>
-            <div className="hd">Task</div>
+          {/* minWidth is the sum of the column minimums, so more variants than fit scroll sideways instead of being cut off. */}
+          <div className="cells" style={{ gridTemplateColumns: `minmax(140px, 1.2fr) repeat(${s.variants.length}, minmax(110px, 1fr))`, minWidth: 142 + s.variants.length * 111 }}>
+            <div className="hd pin">Task</div>
             {s.variants.map((v: any) => <div key={v.key} className="hd clip" title={v.label}>{v.label}</div>)}
             {s.tasks.map((t: string) => [
-              <div key={t} className="clip" title={t}>{t}</div>,
+              <div key={t} className="clip pin" title={t}>{t}</div>,
               ...s.variants.map((v: any) => {
                 const cell = s.cells.find((x: any) => x.task_id === t && x.variant_key === v.key);
                 return (
