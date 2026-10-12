@@ -234,6 +234,13 @@ pub struct AblationRequest {
     /// intact, instead of the body's sections (skills only).
     #[serde(default)]
     pub description_sentences: bool,
+    /// Add a placebo variant: the frontmatter kept, the body replaced by
+    /// innocuous text of matched length.
+    #[serde(default)]
+    pub placebo: bool,
+    /// Sentences for the placebo instead of the built-in corpus (one per line).
+    #[serde(default)]
+    pub placebo_file: Option<String>,
     /// Task globs for the generated experiment.
     #[serde(default)]
     pub tasks: Vec<String>,
@@ -315,12 +322,20 @@ pub(crate) fn resolve_source(project: &Project, source: &str) -> Result<Source> 
 }
 
 fn write_variant(src: &Source, dir: &Path, content: Option<&str>) -> Result<()> {
+    write_variant_files(src, dir, content, true)
+}
+
+/// `siblings`: copy the skill directory's other files (references, scripts)
+/// alongside. A placebo leaves them out: its body points at none of them.
+fn write_variant_files(src: &Source, dir: &Path, content: Option<&str>, siblings: bool) -> Result<()> {
     let _ = std::fs::remove_dir_all(dir);
     match &src.skill_dir {
         Some(skill_dir) => {
             let dst = dir.join(".claude/skills").join(skill_dir.file_name().unwrap());
             std::fs::create_dir_all(&dst)?;
-            copy_dir_contents(skill_dir, &dst)?;
+            if siblings {
+                copy_dir_contents(skill_dir, &dst)?;
+            }
             if let Some(c) = content {
                 std::fs::write(dst.join("SKILL.md"), c)?;
             }
@@ -418,6 +433,22 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
         description_only = Some(rel);
     }
 
+    let mut placebo = None;
+    if req.placebo || req.placebo_file.is_some() {
+        let corpus = match &req.placebo_file {
+            Some(f) => crate::placebo::Corpus::parse(&std::fs::read_to_string(project.abs(f)).with_context(|| format!("reading placebo file {f}"))?),
+            None => crate::placebo::Corpus::builtin(),
+        };
+        if corpus.sentences.is_empty() {
+            bail!("the placebo file has no sentences (one per line)");
+        }
+        let rel = format!("{base_rel}/placebo");
+        write_variant_files(&src, &base.join("placebo"), Some(&crate::placebo::placebo_file(&text, &corpus)), false)?;
+        overlays.push(rel.clone());
+        levels.push(Level::Detailed { value: rel.clone(), label: Some("placebo".into()), extra: Default::default() });
+        placebo = Some(rel);
+    }
+
     let mut graders = std::collections::BTreeMap::new();
     if let Some(m) = &req.judge_model {
         graders.insert(
@@ -457,6 +488,7 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
             full: full_rel,
             description_only,
             mode: by_sentence.then(|| "description_sentences".to_string()),
+            placebo,
             sections: meta_sections,
         }),
         trigger: by_sentence.then(|| TriggerCfg { skill: Some(src.display_name.clone()), skills: vec![] }),
@@ -582,5 +614,21 @@ mod tests {
         let meta = exp.ablation.unwrap();
         assert_eq!(meta.sections[1].title, "One");
         assert!(meta.description_only.is_some());
+        assert!(meta.placebo.is_none());
+
+        // --placebo adds one variant: frontmatter kept, body replaced, no sibling files.
+        let plan = generate(&project, &AblationRequest { source: "overlays/demo".into(), placebo: true, ..Default::default() }).unwrap();
+        assert_eq!(plan.overlays.last().unwrap(), "overlays/ablation/demo-skill-ablation/placebo");
+        let exp = project.load_experiment("demo-skill-ablation").unwrap();
+        assert_eq!(exp.variants().last().unwrap().label, "placebo");
+        assert_eq!(exp.ablation.as_ref().unwrap().placebo.as_deref(), Some("overlays/ablation/demo-skill-ablation/placebo"));
+        let placebo = std::fs::read_to_string(base.join("placebo/.claude/skills/demo/SKILL.md")).unwrap();
+        assert!(placebo.starts_with("---\nname: demo-skill\ndescription: Use when writing.\n---\n"));
+        assert!(!placebo.contains("Body one") && !placebo.contains("Deeper"));
+        assert!(!base.join("placebo/.claude/skills/demo/references").exists());
+        // A user's own sentences.
+        std::fs::write(tmp.path().join("mine.txt"), "Water is wet.\nThe sky is up.\n").unwrap();
+        generate(&project, &AblationRequest { source: "overlays/demo".into(), placebo_file: Some("mine.txt".into()), ..Default::default() }).unwrap();
+        assert!(std::fs::read_to_string(base.join("placebo/.claude/skills/demo/SKILL.md")).unwrap().contains("Water is wet."));
     }
 }

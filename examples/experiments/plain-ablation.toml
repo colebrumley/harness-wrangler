@@ -42,6 +42,10 @@ label = "−Add flourish"
 value = "overlays/ablation/plain-ablation/description-only"
 label = "description-only"
 
+[[factors.levels]]
+value = "overlays/ablation/plain-ablation/placebo"
+label = "placebo"
+
 [tasks]
 include = ["tasks/mock/*.toml"]
 
@@ -58,6 +62,7 @@ factor = "overlay"
 baseline = "overlays/none"
 full = "overlays/ablation/plain-ablation/full"
 description_only = "overlays/ablation/plain-ablation/description-only"
+placebo = "overlays/ablation/plain-ablation/placebo"
 
 [[ablation.sections]]
 index = 0

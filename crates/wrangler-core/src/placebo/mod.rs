@@ -57,49 +57,51 @@ impl Corpus {
     }
 }
 
-/// Draws sentences and headings in order, wrapping around.
+/// Draws sentences and headings from the corpus. A sentence is not drawn
+/// again until most of the others have been, so text repeats only as often
+/// as the corpus is short.
 struct Draw<'a> {
     corpus: &'a Corpus,
-    sentence: usize,
+    /// Indexes of recently drawn sentences, oldest first.
+    recent: std::collections::VecDeque<usize>,
     heading: usize,
 }
 
 impl Draw<'_> {
-    fn sentence(&mut self) -> &str {
-        let s = &self.corpus.sentences[self.sentence % self.corpus.sentences.len()];
-        self.sentence += 1;
-        s
+    /// The sentence closest in length to `target` among those not drawn recently.
+    fn fitting(&mut self, target: usize) -> String {
+        let n = self.corpus.sentences.len();
+        let best = (0..n).filter(|i| !self.recent.contains(i)).min_by_key(|i| (self.corpus.sentences[*i].len().abs_diff(target), *i)).unwrap_or(0);
+        self.recent.push_back(best);
+        // Hold back three quarters of the corpus: enough choice left to fit lengths.
+        while self.recent.len() > n * 3 / 4 {
+            self.recent.pop_front();
+        }
+        self.corpus.sentences[best].clone()
     }
     fn heading(&mut self) -> &str {
         let s = &self.corpus.headings[self.heading % self.corpus.headings.len()];
         self.heading += 1;
         s
     }
-    /// The sentence among the next few whose length is closest to `target`.
-    fn fitting(&mut self, target: usize) -> String {
-        let n = self.corpus.sentences.len();
-        let best = (0..n.min(12)).min_by_key(|k| self.corpus.sentences[(self.sentence + k) % n].len().abs_diff(target)).unwrap_or(0);
-        let s = self.corpus.sentences[(self.sentence + best) % n].clone();
-        self.sentence += 1;
-        s
-    }
-    /// Sentences until the text is about as long as `target` characters.
+    /// Sentences until the text is about `target` characters long.
     fn about(&mut self, target: usize) -> String {
         let mut out = String::new();
         loop {
-            // A short slot (a terse bullet) gets the best-fitting sentence, not merely the next one.
-            let next = if out.is_empty() { self.fitting(target) } else { self.sentence().to_string() };
-            if !out.is_empty() && out.len() + next.len() / 2 > target {
-                self.sentence -= 1;
+            let left = target.saturating_sub(out.len());
+            // Stop when what remains is less than half the shortest sentence.
+            if !out.is_empty() && left < 12 {
+                break;
+            }
+            let next = self.fitting(left);
+            if !out.is_empty() && next.len() > left * 2 {
+                self.recent.pop_back();
                 break;
             }
             if !out.is_empty() {
                 out.push(' ');
             }
             out.push_str(&next);
-            if out.len() >= target {
-                break;
-            }
         }
         out
     }
@@ -120,27 +122,27 @@ fn bullet_prefix(line: &str) -> Option<&str> {
     None
 }
 
-/// Replace a Markdown text with placebo text in the same shape: a heading
-/// for each heading (same level), a bullet for each bullet, a paragraph for
-/// each paragraph, each about as long as what it replaces. Fenced code
-/// blocks become paragraphs. The result's estimated token count is within
-/// `TOLERANCE` of the original's.
-pub fn placebo_text(original: &str, corpus: &Corpus) -> String {
-    assert!(!corpus.sentences.is_empty() && !corpus.headings.is_empty(), "placebo corpus is empty");
-    let mut draw = Draw { corpus, sentence: 0, heading: 0 };
-    let mut blocks: Vec<String> = vec![];
-    let mut para = 0usize; // characters of the paragraph being accumulated
+/// The shape of the original, one entry per output line.
+enum Block {
+    Heading(usize),
+    /// List marker (with its indent) and the characters of text the item holds.
+    Bullet(String, usize),
+    Para(usize),
+    Blank,
+}
+
+fn shape(original: &str) -> Vec<Block> {
+    let mut blocks: Vec<Block> = vec![];
     let mut fence: Option<&str> = None;
-    let flush = |para: &mut usize, blocks: &mut Vec<String>, draw: &mut Draw| {
-        if *para > 0 {
-            blocks.push(draw.about(*para));
-            *para = 0;
-        }
+    // Text lines extend the paragraph or list item they follow.
+    let extend = |blocks: &mut Vec<Block>, chars: usize| match blocks.last_mut() {
+        Some(Block::Para(n)) | Some(Block::Bullet(_, n)) => *n += chars,
+        _ => blocks.push(Block::Para(chars)),
     };
     for line in original.lines() {
         let t = line.trim_start();
         if let Some(f) = fence {
-            para += line.len() + 1;
+            extend(&mut blocks, t.len() + 1);
             if t.starts_with(f) {
                 fence = None;
             }
@@ -148,24 +150,44 @@ pub fn placebo_text(original: &str, corpus: &Corpus) -> String {
         }
         if t.starts_with("```") || t.starts_with("~~~") {
             fence = Some(&t[..3]);
-            para += line.len() + 1;
+            // A fenced block reads as a paragraph of its own.
+            if !matches!(blocks.last(), Some(Block::Para(_))) {
+                blocks.push(Block::Para(0));
+            }
+            extend(&mut blocks, t.len() + 1);
             continue;
         }
         let hashes = t.chars().take_while(|c| *c == '#').count();
         if (1..=6).contains(&hashes) && t[hashes..].starts_with(' ') {
-            flush(&mut para, &mut blocks, &mut draw);
-            blocks.push(format!("{} {}", "#".repeat(hashes), draw.heading()));
+            blocks.push(Block::Heading(hashes));
         } else if let Some(prefix) = bullet_prefix(line) {
-            flush(&mut para, &mut blocks, &mut draw);
-            blocks.push(format!("{prefix}{}", draw.about(line.len().saturating_sub(prefix.len()))));
+            blocks.push(Block::Bullet(prefix.to_string(), line.len() - prefix.len()));
         } else if t.is_empty() {
-            flush(&mut para, &mut blocks, &mut draw);
-            blocks.push(String::new());
+            blocks.push(Block::Blank);
         } else {
-            para += line.len() + 1;
+            extend(&mut blocks, t.len() + 1);
         }
     }
-    flush(&mut para, &mut blocks, &mut draw);
+    blocks
+}
+
+/// Replace a Markdown text with placebo text in the same shape: a heading
+/// for each heading (same level), a list item for each list item, a
+/// paragraph for each paragraph, each about as long as what it replaces.
+/// Fenced code blocks become paragraphs. The result's estimated token count
+/// is within `TOLERANCE` of the original's.
+pub fn placebo_text(original: &str, corpus: &Corpus) -> String {
+    assert!(!corpus.sentences.is_empty() && !corpus.headings.is_empty(), "placebo corpus is empty");
+    let mut draw = Draw { corpus, recent: Default::default(), heading: 0 };
+    let mut blocks: Vec<String> = shape(original)
+        .into_iter()
+        .map(|b| match b {
+            Block::Heading(level) => format!("{} {}", "#".repeat(level), draw.heading()),
+            Block::Bullet(prefix, chars) => format!("{prefix}{}", draw.about(chars)),
+            Block::Para(chars) => draw.about(chars),
+            Block::Blank => String::new(),
+        })
+        .collect();
 
     // Blocks are sized one at a time, so the total drifts. Pull it back
     // inside the tolerance by adding to or trimming the last prose block.
@@ -178,13 +200,15 @@ pub fn placebo_text(original: &str, corpus: &Corpus) -> String {
         s
     };
     let is_prose = |b: &String| !b.is_empty() && !b.starts_with('#');
+    // Where a block's own text starts, past any list marker ("1. " has a period of its own).
+    let body_at = |b: &String| bullet_prefix(b).map(|p| p.len()).unwrap_or(0);
     for _ in 0..10_000 {
         let now = est_tokens(&render(&blocks)) as f64;
         if target == 0.0 || (now - target).abs() <= target * TOLERANCE / 2.0 {
             break;
         }
         if now < target {
-            let extra = draw.sentence().to_string();
+            let extra = draw.fitting(((target - now) * 4.0) as usize);
             match blocks.iter_mut().rev().find(|b| is_prose(b)) {
                 Some(b) => {
                     b.push(' ');
@@ -193,8 +217,6 @@ pub fn placebo_text(original: &str, corpus: &Corpus) -> String {
                 None => blocks.push(extra),
             }
         } else {
-            // Where a block's own text starts, past any list marker ("1. " has a period of its own).
-            let body_at = |b: &String| bullet_prefix(b).map(|p| p.len()).unwrap_or(0);
             match blocks.iter_mut().rev().find(|b| is_prose(b) && b[body_at(b)..].trim_end_matches('.').contains(". ")) {
                 Some(b) => {
                     let at = body_at(b);
@@ -261,6 +283,11 @@ mod tests {
         let original: std::collections::HashSet<String> = sentences_of(body).into_iter().collect();
         let shared: Vec<String> = sentences_of(pbody).into_iter().filter(|s| original.contains(s)).collect();
         assert!(shared.is_empty(), "placebo shares sentences with the original: {shared:?}");
+        // No sentence twice in a row, and the list shape survives.
+        let all = crate::ablation::split_sentences(&pbody.replace('\n', " "));
+        assert!(all.windows(2).all(|w| w[0].trim() != w[1].trim()), "adjacent repeats");
+        let items = |t: &str| t.lines().filter(|l| bullet_prefix(l).is_some()).count();
+        assert_eq!(items(pbody), items(body));
     }
 
     /// The corpus must not move the mock runner (which reads `mock-effect:`

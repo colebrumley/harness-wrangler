@@ -202,7 +202,38 @@ pub struct AblationReport {
     /// full − description-only: what the body adds beyond the description.
     pub body_effect: Option<Effect>,
     pub skill_invoked_rate: Option<f64>,
+    /// Present when the ablation carries a placebo variant.
+    #[serde(default)]
+    pub placebo: Option<PlaceboReport>,
     pub sections: Vec<SectionAttribution>,
+}
+
+/// Is the gain from these words, or from having words at all?
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaceboReport {
+    /// full − placebo.
+    pub full_vs_placebo: Option<Effect>,
+    /// placebo − none.
+    pub placebo_vs_none: Option<Effect>,
+    /// content: full beats placebo. presence: placebo matches full and beats
+    /// none. neither: nothing beats none. Otherwise inconclusive.
+    pub attribution: String,
+}
+
+/// Whole-file attribution from the three comparisons.
+pub fn placebo_attribution(full_vs_none: Option<&Effect>, full_vs_placebo: Option<&Effect>, placebo_vs_none: Option<&Effect>) -> &'static str {
+    let v = |e: Option<&Effect>| e.map(|e| e.verdict);
+    let beats = |e: Option<&Effect>| matches!(v(e), Some(Verdict::Better) | Some(Verdict::Higher));
+    let not_better = |e: Option<&Effect>| matches!(v(e), Some(Verdict::Neutral) | Some(Verdict::Worse) | Some(Verdict::Lower));
+    if beats(full_vs_placebo) {
+        "content"
+    } else if v(full_vs_placebo) == Some(Verdict::Neutral) && beats(placebo_vs_none) {
+        "presence"
+    } else if not_better(full_vs_none) && not_better(placebo_vs_none) {
+        "neither"
+    } else {
+        "inconclusive"
+    }
 }
 
 /// A trigger prompt that went the wrong way in one variant.
@@ -842,12 +873,19 @@ fn build_ablation(data: &Data, meta: &AblationMeta, metric: &str) -> AblationRep
             }
         })
         .collect();
+    let full_effect = eff(metric, &none, &full);
+    let placebo = meta.placebo.as_ref().map(|p| {
+        let p = label(p);
+        let (full_vs_placebo, placebo_vs_none) = (eff(metric, &p, &full), eff(metric, &none, &p));
+        PlaceboReport { attribution: placebo_attribution(full_effect.as_ref(), full_vs_placebo.as_ref(), placebo_vs_none.as_ref()).into(), full_vs_placebo, placebo_vs_none }
+    });
     AblationReport {
         source: meta.source.clone(),
         kind: meta.kind.clone(),
         mode: meta.mode.clone().unwrap_or_else(|| "sections".into()),
         metric: metric.to_string(),
-        full_effect: eff(metric, &none, &full),
+        full_effect,
+        placebo,
         description_only_effect: desc.as_ref().and_then(|d| eff(metric, &none, d)),
         body_effect: desc.as_ref().and_then(|d| eff(metric, d, &full)),
         skill_invoked_rate: (!invoked.is_empty()).then(|| stats::mean(&invoked)),
@@ -1105,6 +1143,19 @@ pub fn render_ablation_text(a: &AblationReport) -> String {
         s.push_str(&format!("  description-only vs none: {}\n", e(&a.description_only_effect)));
         s.push_str(&format!("  full vs description-only: {}\n", e(&a.body_effect)));
     }
+    if let Some(p) = &a.placebo {
+        s.push_str(&format!("  full vs placebo: {}\n", e(&p.full_vs_placebo)));
+        s.push_str(&format!("  placebo vs none: {}\n", e(&p.placebo_vs_none)));
+        s.push_str(&format!(
+            "  whole file: {}\n",
+            match p.attribution.as_str() {
+                "content" => "content (the gain comes from these instructions, not from having instructions)",
+                "presence" => "presence (a placebo of the same length does as well; the gain comes from having instructions at all)",
+                "neither" => "neither (nothing beats no file)",
+                _ => "inconclusive (content and presence cannot be told apart on this data)",
+            }
+        ));
+    }
     if let Some(rate) = a.skill_invoked_rate {
         s.push_str(&format!("  skill invoked in {:.0}% of full-skill runs\n", rate * 100.0));
     }
@@ -1125,4 +1176,30 @@ pub fn render_ablation_text(a: &AblationReport) -> String {
     }
     s.push_str(&table(&rows));
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn effect(verdict: Verdict) -> Effect {
+        Effect { effect: 0.0, ci_low: 0.0, ci_high: 0.0, rel: None, base_mean: 0.0, treat_mean: 0.0, units: 3, n_a: 9, n_b: 9, verdict, saturated_units: 0 }
+    }
+
+    #[test]
+    fn placebo_attribution_cases() {
+        let (better, neutral, unsure, worse) = (effect(Verdict::Better), effect(Verdict::Neutral), effect(Verdict::Inconclusive), effect(Verdict::Worse));
+        let attr = |fvn: &Effect, fvp: &Effect, pvn: &Effect| placebo_attribution(Some(fvn), Some(fvp), Some(pvn));
+        // placebo ≈ full > none: having instructions is what helps.
+        assert_eq!(attr(&better, &neutral, &better), "presence");
+        // full > placebo ≈ none: these instructions are what helps.
+        assert_eq!(attr(&better, &better, &neutral), "content");
+        // Both beat none and full beats placebo too: still content.
+        assert_eq!(attr(&better, &better, &better), "content");
+        assert_eq!(attr(&neutral, &neutral, &neutral), "neither");
+        assert_eq!(attr(&worse, &neutral, &worse), "neither");
+        assert_eq!(attr(&better, &unsure, &better), "inconclusive");
+        assert_eq!(attr(&better, &neutral, &unsure), "inconclusive");
+        assert_eq!(placebo_attribution(Some(&better), None, None), "inconclusive");
+    }
 }

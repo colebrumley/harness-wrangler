@@ -146,6 +146,23 @@ Every grader takes an optional `name`. Give a fixture a `.gitignore` for build d
 
 Every grader takes an optional `name`. The baseline commit is tagged `wrangler-baseline`, so a command grader can check `git diff --quiet wrangler-baseline -- tests`.
 
+## Placebo overlays
+
+A measured gain from a skill or a `CLAUDE.md` may come from having instructions at all. `wrangler ablate <source> --placebo` adds a variant named `placebo` that tells the two apart: for a skill, the frontmatter is kept byte for byte (so it triggers the same way) and the body is replaced; for a `CLAUDE.md`, the whole file is replaced. The replacement has the same Markdown shape (a heading for each heading, a list item for each list item, a paragraph for each paragraph) and an estimated token count within ten percent of the original's.
+
+What a placebo contains: sentences that restate what an agent does anyway, such as "A request arrives as text." and "Tools are available during the session." The built-in corpus is `crates/wrangler-core/src/placebo/corpus.md`. A sentence belongs there only if deleting it could not plausibly change an agent's output, which rules out anything about quality, length, tone, care, checking, testing, planning, asking, or order of work; a test holds the corpus to a list of banned words. The corpus is finite, so a long file's placebo repeats sentences, never two in a row. `--placebo-file <path>` substitutes your own sentences, one per line.
+
+The ablation report then shows `full vs placebo` and `placebo vs none` beside `full vs none`, and attributes the whole file:
+
+| Attribution | When |
+|---|---|
+| `content` | the full file beats the placebo |
+| `presence` | the placebo matches the full file and beats no file: the gain comes from having instructions, and advice says a shorter file would do (`placebo_explains`) |
+| `neither` | nothing beats no file |
+| `inconclusive` | the intervals do not separate these |
+
+A placebo is also just an overlay. It is written under `overlays/ablation/<experiment>/placebo/` and can be a level of any overlay factor. `wrangler placebo <file> [-o out]` writes a placebo of any Markdown or text file, for use as an overlay's `CLAUDE.md` or as a `file:` level of a `system_prompt_append` factor.
+
 ## Trigger experiments
 
 For most skills the value is firing at the right moment, and firing on unrelated prompts is a cost on every run. A trigger experiment measures both directions. Triggering is decided from the description and the prompt before the body is read, so these runs stop after a turn or two and need no fixture and no judge.

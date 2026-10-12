@@ -6,6 +6,13 @@ import { useLoad } from "../hooks";
 
 const WORD: Record<string, string> = { carries: "carries the effect", hurts: "hurts", no_effect: "no effect", inconclusive: "inconclusive", no_headroom: "no headroom", no_data: "no data" };
 
+const PLACEBO: Record<string, [string, string]> = {
+  content: ["The gain comes from this content", "The file beats a placebo of the same length, so the words themselves are doing the work."],
+  presence: ["The gain comes from having instructions at all", "A placebo of the same length does as well as the file and beats no file. A much shorter file would do."],
+  neither: ["Nothing beats no file", "Neither the file nor its placebo improves on the baseline."],
+  inconclusive: ["Content and presence cannot be told apart yet", "The intervals are too wide to say whether the file beats its placebo. More tasks or runs would settle it."],
+};
+
 export default function Ablation({ ctx }: { ctx: Ctx }) {
   const id = ctx.launchId;
   const launch = ctx.launches.find((l) => l.id === id);
@@ -45,12 +52,21 @@ export default function Ablation({ ctx }: { ctx: Ctx }) {
                   band={equivalenceBand(m, ab.full_effect?.base_mean ?? 0)}
                   rows={[
                     { key: "full", label: "Full file", sub: "against no file at all", effect: ab.full_effect },
+                    ...(ab.placebo ? [
+                      { key: "fvp", label: "Full file vs placebo", sub: "against innocuous text of the same length and shape", effect: ab.placebo.full_vs_placebo },
+                      { key: "pvn", label: "Placebo", sub: "the placebo against no file at all", effect: ab.placebo.placebo_vs_none },
+                    ] : []),
                     ...(ab.description_only_effect ? [
                       { key: "desc", label: "Description only", sub: "frontmatter with the body removed, against no file", effect: ab.description_only_effect },
                       { key: "body", label: "What the body adds", sub: "full file against description only", effect: ab.body_effect },
                     ] : []),
                   ]}
                 />
+                {ab.placebo && (
+                  <div className={`note ${ab.placebo.attribution === "presence" ? "warn" : ""}`}>
+                    <b>{PLACEBO[ab.placebo.attribution]?.[0] ?? ab.placebo.attribution}.</b> {PLACEBO[ab.placebo.attribution]?.[1]}
+                  </div>
+                )}
                 {ab.skill_invoked_rate !== null && ab.skill_invoked_rate !== undefined && (
                   <div className={`note ${ab.skill_invoked_rate < 0.5 ? "warn" : ""}`}>
                     The skill was invoked in {Math.round(ab.skill_invoked_rate * 100)}% of full-file runs.
@@ -119,7 +135,7 @@ function NewAblation({ ctx }: { ctx: Ctx }) {
   const overlays = useLoad<string[]>("overlays_list");
   const [source, setSource] = useState("");
   const [depth, setDepth] = useState(2);
-  const [f, setF] = useState({ name: "", tasks: "tasks/**/*.toml", runner: "claude-code", model: "claude-sonnet-5-5", judge_model: "claude-opus-5-5", rubric: "", reps: 5, description_only: true });
+  const [f, setF] = useState({ name: "", tasks: "tasks/**/*.toml", runner: "claude-code", model: "claude-sonnet-5-5", judge_model: "claude-opus-5-5", rubric: "", reps: 5, description_only: true, placebo: true });
   const [error, setError] = useState<string | null>(null);
   const preview = useLoad<any>(source ? "ablation_preview" : null, { source, depth }, []);
   const candidates = (overlays.data ?? []).filter((o) => !o.includes("/ablation/") && !o.endsWith("/none"));
@@ -128,7 +144,7 @@ function NewAblation({ ctx }: { ctx: Ctx }) {
     setError(null);
     try {
       const plan = await call("ablation_generate", {
-        source, depth, name: f.name || undefined, description_only: f.description_only && preview.data?.file?.endsWith("SKILL.md"),
+        source, depth, name: f.name || undefined, description_only: f.description_only && preview.data?.file?.endsWith("SKILL.md"), placebo: f.placebo,
         tasks: f.tasks.split("\n").map((s) => s.trim()).filter(Boolean), runs_per_cell: Number(f.reps) || 5,
         runner: f.runner, model: f.model || undefined, judge_model: f.judge_model || undefined, rubric: f.rubric || undefined,
       });
@@ -164,7 +180,7 @@ function NewAblation({ ctx }: { ctx: Ctx }) {
           <>
             <p className="muted">
               <code>{preview.data.file}</code> splits into {sections.length} sections with content (about {preview.data.est_tokens} tokens in all).
-              That makes {sections.length + 2 + (f.description_only && preview.data.file.endsWith("SKILL.md") ? 1 : 0)} variants: none, full, and one without each section.
+              That makes {sections.length + 2 + (f.description_only && preview.data.file.endsWith("SKILL.md") ? 1 : 0) + (f.placebo ? 1 : 0)} variants: none, full, and one without each section{f.placebo ? ", plus a placebo" : ""}.
             </p>
             <table className="grid">
               <tbody>{sections.map((s: any) => <tr key={s.index}><td style={{ width: 40 }} className="faint">{s.index + 1}</td><td>{s.title}</td><td className="num muted">lines {s.start_line}–{s.end_line}</td><td className="num muted">~{s.est_tokens} tokens</td></tr>)}</tbody>
@@ -172,6 +188,7 @@ function NewAblation({ ctx }: { ctx: Ctx }) {
             {preview.data.file.endsWith("SKILL.md") && <label className="check"><input type="checkbox" checked={f.description_only} onChange={(e) => set("description_only", e.target.checked)} /> Also test the description alone, to separate triggering from content</label>}
           </>
         )}
+        {preview.data && <label className="check"><input type="checkbox" checked={f.placebo} onChange={(e) => set("placebo", e.target.checked)} /> Add a placebo of the same length, to tell "these instructions" from "any instructions"</label>}
         <div><button className="btn primary" disabled={!source || sections.length < 2} onClick={generate}>Create ablation experiment</button></div>
       </div>
     </Panel>

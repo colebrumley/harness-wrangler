@@ -77,3 +77,37 @@ Notes are notes.
 A session has turns.
 Requests arrive as text.
 This is a note.
+The assistant reads the request and then replies.
+A reply is sent once it has been written.
+A request can mention files by name.
+A file can be opened and its contents read.
+Some files hold code and some hold prose.
+A directory can hold many files.
+The working directory has a path.
+A path names a file or a directory.
+A tool has a name and takes input.
+The input to a tool is given when the tool is used.
+Several tools can be used in one session.
+A session can have one request or many.
+A later request can refer to an earlier one.
+Words are separated by spaces.
+A sentence ends with a full stop.
+A paragraph is one or more sentences.
+A list is a run of items.
+A heading is a line that names a section.
+A code block holds code and nothing else.
+Text can be long or it can be a few words.
+The person may write again after a reply.
+The assistant writes replies and the person reads them.
+A reply belongs to the session it was written in.
+These notes were written in advance of the session.
+The notes are the same from one session to the next.
+The file is a text file.
+The file can be read from top to bottom.
+This line is part of the file.
+The session has a start and an end.
+A request is a message.
+A reply is a message.
+Files have names.
+This is one sentence.
+The notes continue below.

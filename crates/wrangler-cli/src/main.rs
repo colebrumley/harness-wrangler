@@ -125,6 +125,13 @@ enum Cmd {
         /// attribute trigger precision and recall to each sentence.
         #[arg(long)]
         description_sentences: bool,
+        /// Add a placebo variant: same frontmatter, body replaced by innocuous
+        /// text of matched length. Separates "these instructions" from "any instructions".
+        #[arg(long)]
+        placebo: bool,
+        /// Your own placebo sentences, one per line (implies --placebo).
+        #[arg(long)]
+        placebo_file: Option<String>,
         /// Task globs (repeatable). Default tasks/**/*.toml.
         #[arg(long = "tasks")]
         tasks: Vec<String>,
@@ -142,6 +149,17 @@ enum Cmd {
         rubric: Option<String>,
         #[arg(long)]
         metric: Option<String>,
+    },
+    /// Write a placebo of a Markdown or text file: innocuous text of matched
+    /// length and shape. Use it as an overlay's CLAUDE.md or a `file:` system prompt append.
+    Placebo {
+        file: PathBuf,
+        /// Where to write it (default: print).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Your own placebo sentences, one per line.
+        #[arg(long)]
+        placebo_file: Option<PathBuf>,
     },
     /// Draft should-fire and should-not-fire prompts for a skill from its description.
     TriggerSet {
@@ -460,6 +478,31 @@ fn real_main(cli: Cli) -> Result<()> {
                 println!("draft: task {} ({}) is tagged `draft`; review it and remove the tag", t.id, t.source);
             }
         }
+        Cmd::Placebo { file, output, placebo_file } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let corpus = match &placebo_file {
+                Some(f) => wrangler_core::placebo::Corpus::parse(&std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?),
+                None => wrangler_core::placebo::Corpus::builtin(),
+            };
+            if corpus.sentences.is_empty() {
+                bail!("the placebo file has no sentences (one per line)");
+            }
+            let out = wrangler_core::placebo::placebo_file(&text, &corpus);
+            let (a, b) = (wrangler_core::util::est_tokens(&text), wrangler_core::util::est_tokens(&out));
+            match output {
+                Some(path) => {
+                    if let Some(dir) = path.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    std::fs::write(&path, &out).with_context(|| format!("writing {}", path.display()))?;
+                    if json {
+                        return print_json(&json!({"written": path, "est_tokens": b, "original_est_tokens": a}));
+                    }
+                    println!("wrote {} (~{b} tokens; the original is ~{a})", path.display());
+                }
+                None => print!("{out}"),
+            }
+        }
         Cmd::TriggerSet { skill, n, model } => {
             let cancel = cancel_on_sigint();
             let set = trigger::generate(&project, &skill, n.clamp(1, 100), &model, &cancel)?;
@@ -626,8 +669,8 @@ fn real_main(cli: Cli) -> Result<()> {
                 println!("\n(use --output, --diff or --transcript for the content)");
             }
         }
-        Cmd::Ablate { source, name, depth, description_only, description_sentences, tasks, reps, runner, model, effort, judge_model, rubric, metric } => {
-            let plan = ablation::generate(&project, &AblationRequest { source, name, depth: Some(depth), description_only, description_sentences, tasks, runs_per_cell: reps, runner, model, effort, judge_model, rubric, primary_metric: metric })?;
+        Cmd::Ablate { source, name, depth, description_only, description_sentences, placebo, placebo_file, tasks, reps, runner, model, effort, judge_model, rubric, metric } => {
+            let plan = ablation::generate(&project, &AblationRequest { source, name, depth: Some(depth), description_only, description_sentences, placebo, placebo_file, tasks, runs_per_cell: reps, runner, model, effort, judge_model, rubric, primary_metric: metric })?;
             if json {
                 return print_json(&plan);
             }

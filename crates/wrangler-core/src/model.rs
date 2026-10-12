@@ -336,6 +336,10 @@ pub struct AblationMeta {
     /// sentences, body intact; `sections` then holds one entry per sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Overlay level holding the placebo: same frontmatter, body replaced by
+    /// innocuous text of matched length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placebo: Option<String>,
     pub sections: Vec<AblationSection>,
 }
 

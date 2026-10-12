@@ -94,6 +94,7 @@ fn ablation_attributes_sections() {
         &wrangler_core::ablation::AblationRequest {
             source: "overlays/plain".into(),
             description_only: true,
+            placebo: true,
             runner: Some("mock".into()),
             judge_model: Some("mock".into()),
             runs_per_cell: Some(6),
@@ -116,6 +117,35 @@ fn ablation_attributes_sections() {
     assert!(ab.description_only_effect.is_some() && ab.body_effect.is_some());
     assert_eq!(ab.skill_invoked_rate, Some(1.0));
     assert!(report::render_ablation_text(&ab).contains("carries"));
+    // The mock responds to the skill's own lines and not to the placebo
+    // corpus, so the gain is from the content.
+    let placebo = ab.placebo.as_ref().expect("placebo section");
+    assert_eq!(placebo.attribution, "content", "{placebo:?}");
+    assert_eq!(placebo.full_vs_placebo.as_ref().unwrap().verdict, Verdict::Better);
+    assert!(placebo.placebo_vs_none.as_ref().unwrap().verdict != Verdict::Better);
+    assert!(report::render_ablation_text(&ab).contains("full vs placebo"));
+    assert!(advice::build(&store, launch, None).unwrap().iter().all(|s| s.kind != "placebo_explains"));
+
+    // A CLAUDE.md that helps only as much as its own placebo: presence, and advice says so.
+    common::write(tmp.path(), "overlays/vague/CLAUDE.md", "# Notes\n\nBe good at this.\n\n## More\n\nTry hard on every task you get.\n");
+    let plan = wrangler_core::ablation::generate(&project, &wrangler_core::ablation::AblationRequest { source: "overlays/vague".into(), placebo: true, runner: Some("mock".into()), judge_model: Some("mock".into()), runs_per_cell: Some(30), ..Default::default() }).unwrap();
+    // Give both the file and its placebo the same lift, as "any instructions help" would.
+    for variant in ["full", "placebo"] {
+        let f = tmp.path().join(format!("overlays/ablation/{}/{variant}/CLAUDE.md", plan.experiment));
+        let text = std::fs::read_to_string(&f).unwrap();
+        std::fs::write(&f, format!("{text}\nmock-effect: 0.25\n")).unwrap();
+    }
+    let exp = project.load_experiment(&plan.experiment).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let rep = report::build(&store, launch, None).unwrap();
+    let p = rep.ablation.as_ref().unwrap().placebo.as_ref().unwrap();
+    assert_eq!(p.attribution, "presence", "{p:#?}");
+    let adv = advice::build(&store, launch, None).unwrap();
+    let s = adv.iter().find(|s| s.kind == "placebo_explains").expect("placebo_explains");
+    assert_eq!(s.priority, 1);
+    assert!(s.action.starts_with("The gain comes from having instructions, not from this content; a shorter file would do."));
+    assert!(s.evidence["full_vs_placebo"]["verdict"] == "neutral" && s.evidence["placebo_vs_none"]["verdict"] == "better");
 }
 
 #[test]

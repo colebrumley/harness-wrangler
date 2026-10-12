@@ -67,6 +67,10 @@ label = "−References"
 value = "overlays/ablation/rfw-ablation/description-only"
 label = "description-only"
 
+[[factors.levels]]
+value = "overlays/ablation/rfw-ablation/placebo"
+label = "placebo"
+
 [tasks]
 include = ["tasks/writing/*.toml"]
 
@@ -84,6 +88,7 @@ factor = "overlay"
 baseline = "overlays/none"
 full = "overlays/ablation/rfw-ablation/full"
 description_only = "overlays/ablation/rfw-ablation/description-only"
+placebo = "overlays/ablation/rfw-ablation/placebo"
 
 [[ablation.sections]]
 index = 0

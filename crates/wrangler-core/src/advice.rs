@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub struct Suggestion {
     pub id: String,
     /// remove_section | review_section | keep_section | retire_pattern | drop_pattern |
-    /// keep_pattern | no_headroom | trigger_misses | trigger_overfires | trim_body | change_level | tradeoff |
+    /// keep_pattern | no_headroom | placebo_explains | trigger_misses | trigger_overfires | trim_body | change_level | tradeoff |
     /// flaky_task | more_runs | judge_bias | reviewer_flag | failures
     pub kind: String,
     /// 1 is most urgent.
@@ -139,6 +139,19 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             Some((e, Verdict::Neutral)) => push("retire_pattern", 1, format!("Consider retiring {}: with every section in place it has no measurable effect on {} ({}){on_model}.", ab.source, pinfo.label.to_lowercase(), ci(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "medium"),
             Some((e, Verdict::Worse)) | Some((e, Verdict::Lower)) => push("retire_pattern", 1, format!("Remove {}: as a whole it {}{on_model}.", ab.source, moves(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "high"),
             _ => {}
+        }
+        if let Some(p) = ab.placebo.as_ref().filter(|p| p.attribution == "presence") {
+            if let (Some(full), Some(fvp), Some(pvn)) = (&ab.full_effect, &p.full_vs_placebo, &p.placebo_vs_none) {
+                push(
+                    "placebo_explains",
+                    1,
+                    format!("The gain comes from having instructions, not from this content; a shorter file would do. A placebo of the same length matches {} on {} (full − placebo {}) and beats no file ({}){on_model}.", ab.source, pinfo.label.to_lowercase(), ci(&pinfo, fvp), ci(&pinfo, pvn)),
+                    file_target.clone(),
+                    &pm,
+                    json!({"attribution": "presence", "full_vs_none": evidence(full, launch_id), "full_vs_placebo": evidence(fvp, launch_id), "placebo_vs_none": evidence(pvn, launch_id), "launch_id": launch_id}),
+                    "medium",
+                );
+            }
         }
         if let (Some(d), Some(b)) = (&ab.description_only_effect, &ab.body_effect) {
             if d.verdict == Verdict::Better && b.verdict == Verdict::Neutral {
