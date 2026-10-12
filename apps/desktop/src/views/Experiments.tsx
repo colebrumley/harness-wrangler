@@ -108,10 +108,10 @@ function Detail({ name, listed, ctx, onChanged }: { name: string; listed: boolea
   useEffect(() => { if (open === null && mine[0]) setOpen(mine[0].id); }, [mine.length, name]);
   if (!d) return q.error && !listed ? <Missing name={name} ctx={ctx} /> : <ErrorNote error={q.error} />;
   const def = d.def;
-  const launch = async () => {
+  const launch = async (baselineOnly = false) => {
     setError(null);
     try {
-      const r = await call("launch_start", { experiment: name, concurrency: concurrency ? Number(concurrency) : undefined, skip_judge: skipJudge });
+      const r = await call("launch_start", { experiment: name, concurrency: concurrency ? Number(concurrency) : undefined, skip_judge: skipJudge, baseline_only: baselineOnly });
       ctx.reloadLaunches();
       onChanged();
       setOpen(r.launch_id);
@@ -171,7 +171,8 @@ function Detail({ name, listed, ctx, onChanged }: { name: string; listed: boolea
               </table>
             </div>
             <div className="row wrap" style={{ borderTop: "1px solid var(--rule)", paddingTop: 14 }}>
-              <button className="btn primary" disabled={!!d.error} onClick={launch}>Run {d.total_runs ?? ""} runs</button>
+              <button className="btn primary" disabled={!!d.error} onClick={() => launch()}>Run {d.total_runs ?? ""} runs</button>
+              {(d.variants?.length ?? 0) > 1 && <button className="btn" disabled={!!d.error} onClick={() => launch(true)} title="Run only the baseline variant first to see whether each task leaves room for a difference. You can run the other variants afterwards.">Baseline only first</button>}
               <label className="row small muted" style={{ gap: 6 }}>
                 At a time
                 <input type="number" min={1} max={16} placeholder={String(def.runner.concurrency)} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} style={{ width: 64 }} />
@@ -239,7 +240,7 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
         <div className="row">
           {s.active && <button className="btn danger" onClick={() => act("launch_cancel")}>Cancel</button>}
           {overBudget && <label className="row small muted" style={{ gap: 6 }}>New cap $<input type="number" min={0} step="0.5" value={cap} onChange={(e) => setCap(e.target.value)} style={{ width: 80 }} aria-label="New budget in dollars" /></label>}
-          {!s.active && launch.status !== "running" && unfinished && <button className="btn" disabled={overBudget && !(Number(cap) > s.cost_usd + s.judge_cost_usd)} onClick={() => act("launch_resume", { retry_failed: true, budget_usd: overBudget ? Number(cap) : undefined })}>{overBudget ? "Raise cap and resume" : "Resume unfinished runs"}</button>}
+          {!s.active && launch.status !== "running" && unfinished && <button className="btn" disabled={overBudget && !(Number(cap) > s.cost_usd + s.judge_cost_usd)} onClick={() => act("launch_resume", { retry_failed: true, budget_usd: overBudget ? Number(cap) : undefined })}>{overBudget ? "Raise cap and resume" : launch.status === "baseline" ? "Run the other variants" : "Resume unfinished runs"}</button>}
           {!s.active && launch.status !== "running" && s.has_judge && c.done > 0 && s.judged < c.done && <button className="btn" onClick={() => act("judge_run")}>Run the judge</button>}
           {s.human_review && c.done > 0 && <a className="btn" href={`#/review/${launch.id}`} style={{ textDecoration: "none" }}>Review</a>}
           {!s.active && launch.status !== "running" && <button className="btn quiet danger" onClick={() => { if (confirm(`Delete launch #${launch.id} and its run artifacts?`)) act("launch_delete"); }}>Delete</button>}
@@ -259,6 +260,7 @@ function Progress({ launch, ctx }: { launch: LaunchSummary; ctx: Ctx }) {
         )}
         {s.has_judge && (s.judge.scored > 0 || s.judge.pairs_done > 0 || s.phase === "judging" || s.phase === "pairwise") && <JudgeFeed j={s.judge} total={c.total} ctx={ctx} live={s.status === "running"} />}
         {overBudget && <div className="note warn">Stopped at the ${s.budget_usd} budget with {c.pending} runs not started. Finished runs are kept. Set a higher cap to continue.</div>}
+        {launch.status === "baseline" && <div className="note">Only the baseline has run. <a href={`#/results/${launch.id}`}>Results</a> shows each task's headroom: a task the baseline already passes every time cannot show a benefit. Run the other variants when the tasks look right.</div>}
                 {launch.status === "interrupted" && <div className="note warn">The process running this launch stopped. Finished runs are kept; resume to do the rest.</div>}
         {events.map((e, i) => <div key={i} className="note warn">{e.event === "rate_limited" ? `Rate limited on run ${e.run_id}: waiting ${e.wait_s}s before retry ${e.attempt}. ${e.detail}` : e.message}</div>)}
         <ErrorNote error={error ?? q.error} />

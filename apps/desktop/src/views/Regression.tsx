@@ -9,6 +9,7 @@ const VERDICT: Record<string, [string, string]> = {
   harming: ["bad", "▼ harming"],
   neutral: ["", "● no effect"],
   inconclusive: ["warn", "○ inconclusive"],
+  no_headroom: ["warn", "◌ no headroom"],
   no_data: ["", "no data"],
 };
 const CATEGORY: Record<string, [string, string]> = {
@@ -16,6 +17,7 @@ const CATEGORY: Record<string, [string, string]> = {
   regressed: ["Regressed", "These got worse on the new model. Look at them first."],
   redundant: ["Now redundant", "The new model reaches the same result without the pattern."],
   inconclusive: ["Cannot tell yet", "The interval is too wide. More runs would settle it."],
+  not_measured: ["Not measured", "Every task is at the bound with and without the pattern, so there was no room to show anything. Add harder tasks."],
   no_effect: ["No measurable effect", "Not helping on either model."],
   new: ["Helping", "First baseline for these."],
   earning: ["Still earning their keep", "Helping on the new model."],

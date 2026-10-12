@@ -175,7 +175,7 @@ table.grid th.num, table.grid td.num { text-align: right; }
 .v-better { --v: var(--good); --vt: var(--good-ink); }
 .v-worse { --v: var(--bad); --vt: var(--bad-ink); }
 .v-higher, .v-lower { --v: var(--series); --vt: var(--ink); }
-.v-neutral, .v-inconclusive { --v: var(--neutral); --vt: var(--ink-2); }
+.v-neutral, .v-inconclusive, .v-no_headroom { --v: var(--neutral); --vt: var(--ink-2); }
 .whisker { stroke: var(--v); stroke-width: 2; stroke-linecap: round; }
 /* An HTML dot, so the non-uniformly scaled SVG cannot squash it. The 2px ring separates it from the whisker. */
 .fdot { position: absolute; top: 15px; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 6px; background: var(--v); border: 2px solid var(--panel); box-sizing: border-box; pointer-events: none; }

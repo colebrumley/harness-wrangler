@@ -250,12 +250,12 @@ impl Api {
                 let name: String = arg(args, "experiment")?;
                 let exp = p.load_experiment(&name)?;
                 let (id, warnings) = scheduler::create_launch(p, s, &exp, None, &opt::<String>(args, "note")?.unwrap_or_default())?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: false, budget_usd: None })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: false, budget_usd: None, baseline_only: opt(args, "baseline_only")?.unwrap_or(false) })?;
                 json!({"launch_id": id, "warnings": warnings})
             }
             "launch_resume" => {
                 let id: i64 = arg(args, "launch_id")?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: opt(args, "retry_failed")?.unwrap_or(true), budget_usd: opt(args, "budget_usd")? })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: opt(args, "skip_judge")?.unwrap_or(false), retry_failed: opt(args, "retry_failed")?.unwrap_or(true), budget_usd: opt(args, "budget_usd")?, baseline_only: false })?;
                 json!({"launch_id": id})
             }
             "launch_cancel" => {
@@ -281,7 +281,7 @@ impl Api {
             "judge_run" => {
                 // Fill in missing judge grades and pairwise comparisons.
                 let id: i64 = self.resolve(args)?;
-                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None })?;
+                self.spawn_launch(id, RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None, baseline_only: false })?;
                 json!({"launch_id": id})
             }
 
@@ -410,7 +410,7 @@ impl Api {
                     jobs.insert(name.clone(), SuiteJob { model: model.clone(), cancel: cancel.clone(), running: true, error: None });
                 }
                 let me = self.clone();
-                let opts = RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None };
+                let opts = RunOptions { concurrency: opt(args, "concurrency")?, skip_judge: false, retry_failed: false, budget_usd: None, baseline_only: false };
                 std::thread::spawn(move || {
                     let res = suite::run_model(&me.project, &me.store, &name, &model, &opts, cancel, &|e| {
                         if let Event::Started { launch_id, .. } | Event::Finished { launch_id, .. } = &e {
@@ -491,7 +491,7 @@ impl Api {
         let launches = s.list_launches(None)?;
         let running = launches.iter().find(|l| l.status == "running");
         let finished = launches.iter().find(|l| l.status == "done" && l.runs_done > 0);
-        let stopped = launches.iter().find(|l| matches!(l.status.as_str(), "interrupted" | "cancelled" | "budget") && l.runs_done < l.runs_total);
+        let stopped = launches.iter().find(|l| matches!(l.status.as_str(), "interrupted" | "cancelled" | "budget" | "baseline") && l.runs_done < l.runs_total);
         let review = match finished {
             Some(l) if s.launch(l.id).map(|x| x.def.human_enabled()).unwrap_or(false) => Some((l.id, review::progress(s, l.id)?)),
             _ => None,
@@ -508,9 +508,20 @@ impl Api {
                 "detail": if experiments.is_empty() { "Choose what to vary (for example a skill against no skill, across three models) and which tasks to run.".to_string() } else { format!("{} experiment{}: {}", experiments.len(), if experiments.len() == 1 { "" } else { "s" }, experiments.iter().take(4).map(|e| e.name.clone()).collect::<Vec<_>>().join(", ")) },
                 "time": "about 2 minutes in the form", "action": {"label": if experiments.is_empty() { "New experiment" } else { "Open experiments" }, "href": if experiments.is_empty() { "/experiments/new".to_string() } else { format!("/experiments/{}", first_exp.clone().unwrap_or_default()) }}}),
         ];
+        // Optional, between defining and launching: run the baseline alone and
+        // see whether the tasks leave any room for a pattern to show.
+        let checked = launches.iter().find(|l| l.status == "baseline" || (l.status == "done" && l.runs_done > 0));
+        steps.push(json!({"id": "headroom", "title": "Check the tasks leave room", "done": checked.is_some(), "optional": true,
+            "detail": match launches.iter().find(|l| l.status == "baseline") {
+                Some(l) => format!("Launch #{} of {} ran its baseline only. Its results show each task's headroom; resume it to run the variants.", l.id, l.experiment),
+                None => "Run the baseline alone first. A task every run already passes cannot show a benefit, and you find out before paying for the variants. For one new task: wrangler task check <task>.".to_string(),
+            },
+            "time": "one variant's worth of runs",
+            "action": checked.filter(|l| l.status == "baseline").map(|l| json!({"label": "Open the baseline", "href": format!("/results/{}", l.id)})).or_else(|| first_exp.clone().map(|n| json!({"label": "Open and run the baseline", "href": format!("/experiments/{n}")})))}));
         let run_detail = match (running, finished, stopped) {
             (Some(l), _, _) => format!("Launch #{} of {} is running: {} of {} runs done{}.", l.id, l.experiment, l.runs_done, l.runs_total, if l.phase.is_empty() || l.phase == "runs" { String::new() } else { format!(", now {}", l.phase) }),
             (None, Some(l), _) => format!("Launch #{} of {} finished: {} runs, ${:.2}.", l.id, l.experiment, l.runs_done, l.cost_usd),
+            (None, None, Some(l)) if l.status == "baseline" => format!("Launch #{} of {} has its baseline: {} of {} runs. Open it to run the variants.", l.id, l.experiment, l.runs_done, l.runs_total),
             (None, None, Some(l)) => format!("Launch #{} of {} stopped at {} of {} runs. Open it to resume.", l.id, l.experiment, l.runs_done, l.runs_total),
             _ => "Every task runs under every variant several times, then the judge scores the results. You can leave it running.".to_string(),
         };

@@ -149,11 +149,12 @@ export default function Results({ ctx }: { ctx: Ctx }) {
             actions={quality.length > 1 ? <Seg options={quality.slice(0, 4).map((m) => [m.name, m.label] as [string, string])} value={r.primary_metric} onChange={setMetric} /> : undefined} flush>
             <div className="scrollx">
               <table className="grid">
-                <thead><tr><th>Task</th>{r.variants.map((v) => <th key={v.key} className="num">{v.label}</th>)}</tr></thead>
+                <thead><tr><th>Task</th><th title="Room the baseline leaves for this metric to move. None: the baseline is already at the top or bottom with no variance, so this task cannot show a difference.">Headroom</th>{r.variants.map((v) => <th key={v.key} className="num">{v.label}</th>)}</tr></thead>
                 <tbody>
                   {r.tasks.map((t) => (
                     <tr key={t.task_id}>
                       <td><b>{t.task_id}</b> {t.tags.map((x) => <span key={x} className="tag" style={{ marginLeft: 4 }}>{x}</span>)}</td>
+                      <td>{t.headroom?.headroom === "ok" || !t.headroom ? <span className="faint">ok</span> : <span className={`chip ${t.headroom.headroom === "none" ? "warn" : ""}`}>{t.headroom.headroom}{t.headroom.at ? `, ${t.headroom.at}` : ""}</span>}</td>
                       {t.cells.map((c) => {
                         const s = c.metrics[r.primary_metric];
                         const on = cell?.task === t.task_id && cell?.variant === c.variant_key;

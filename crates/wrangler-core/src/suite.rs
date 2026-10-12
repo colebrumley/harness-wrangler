@@ -71,7 +71,7 @@ pub struct ModelCell {
     /// Pattern vs no-pattern baseline on the suite's primary metric.
     pub effect: Option<Effect>,
     pub cost_effect: Option<Effect>,
-    /// helping | neutral | harming | inconclusive | no_data
+    /// helping | neutral | harming | inconclusive | no_headroom | no_data
     pub verdict: String,
     /// Effect on this model minus effect on the previous model.
     pub change_vs_prev: Option<f64>,
@@ -101,6 +101,7 @@ fn verdict_word(e: &Option<Effect>) -> &'static str {
         Some(Verdict::Worse) | Some(Verdict::Lower) => "harming",
         Some(Verdict::Neutral) => "neutral",
         Some(Verdict::Inconclusive) => "inconclusive",
+        Some(Verdict::NoHeadroom) => "no_headroom",
     }
 }
 
@@ -164,7 +165,7 @@ pub fn dashboard(project: &Project, store: &Store, suite_name: &str) -> Result<D
 pub struct DiffItem {
     pub experiment: String,
     pub pattern: String,
-    /// harming | regressed | redundant | inconclusive | no_effect | earning | new
+    /// harming | regressed | redundant | inconclusive | not_measured | no_effect | earning | new
     pub category: String,
     pub priority: u32,
     pub summary: String,
@@ -220,6 +221,8 @@ pub fn diff(project: &Project, store: &Store, suite_name: &str, new_model: &str,
             ("neutral", Some("helping")) => ("regressed", 2),
             ("inconclusive", Some("helping")) => ("inconclusive", 4),
             ("inconclusive", _) | ("no_data", _) => ("inconclusive", 5),
+            // Saturated tasks measure nothing: neither a regression nor a pattern made redundant.
+            ("no_headroom", _) => ("not_measured", 5),
             ("neutral", _) => ("no_effect", 6),
             ("helping", None) => ("new", 7),
             _ => ("earning", 8),
@@ -234,6 +237,7 @@ pub fn diff(project: &Project, store: &Store, suite_name: &str, new_model: &str,
             "regressed" => "stopped helping",
             "redundant" => "now redundant: the model alone reaches what this pattern used to add",
             "inconclusive" => "cannot tell yet",
+            "not_measured" => "not measured: every task is at the bound with and without the pattern",
             "no_effect" => "no measurable effect",
             "new" => "helping (first baseline)",
             _ => "still earning its keep",

@@ -51,15 +51,15 @@ export function Seg<T extends string>({ options, value, onChange }: { options: [
   );
 }
 
-const STATUS_CHIP: Record<string, string> = { done: "good", running: "accent", failed: "bad", timeout: "warn", cancelled: "", interrupted: "warn", budget: "warn", pending: "" };
+const STATUS_CHIP: Record<string, string> = { done: "good", running: "accent", failed: "bad", timeout: "warn", cancelled: "", interrupted: "warn", budget: "warn", baseline: "accent", pending: "" };
 export function StatusChip({ status, phase }: { status: string; phase?: string }) {
-  const word = status === "budget" ? "budget reached" : status;
+  const word = status === "budget" ? "budget reached" : status === "baseline" ? "baseline only" : status;
   return <span className={`chip ${STATUS_CHIP[status] ?? ""}`}>{word}{phase ? `: ${phase}` : ""}</span>;
 }
 
 // Verdicts never rely on colour alone: each has its own glyph and word.
-const GLYPH: Record<Verdict, string> = { better: "▲", worse: "▼", higher: "△", lower: "▽", neutral: "●", inconclusive: "○" };
-const WORD: Record<Verdict, string> = { better: "better", worse: "worse", higher: "higher", lower: "lower", neutral: "no effect", inconclusive: "inconclusive" };
+const GLYPH: Record<Verdict, string> = { better: "▲", worse: "▼", higher: "△", lower: "▽", neutral: "●", inconclusive: "○", no_headroom: "◌" };
+const WORD: Record<Verdict, string> = { better: "better", worse: "worse", higher: "higher", lower: "lower", neutral: "no effect", inconclusive: "inconclusive", no_headroom: "no headroom" };
 
 export function VerdictMark({ verdict, word }: { verdict: Verdict; word?: string }) {
   return (

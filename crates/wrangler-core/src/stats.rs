@@ -158,6 +158,10 @@ pub enum Verdict {
     Neutral,
     /// The CI spans zero and is too wide to say.
     Inconclusive,
+    /// Every pairing unit sits at the metric's bound in both arms, so the
+    /// data could not have shown an effect. Counts as inconclusive.
+    #[serde(rename = "no_headroom")]
+    NoHeadroom,
 }
 
 impl Verdict {
@@ -169,6 +173,7 @@ impl Verdict {
             Verdict::Lower => "lower",
             Verdict::Neutral => "neutral",
             Verdict::Inconclusive => "inconclusive",
+            Verdict::NoHeadroom => "no headroom",
         }
     }
     pub fn is_conclusive_change(&self) -> bool {
@@ -192,6 +197,95 @@ pub struct Effect {
     pub n_a: usize,
     pub n_b: usize,
     pub verdict: Verdict,
+    /// Pairing units left out of the estimate because both arms sit at the
+    /// metric's bound. When every unit is saturated the verdict is `NoHeadroom`.
+    #[serde(default)]
+    pub saturated_units: usize,
+}
+
+/// How much room a set of baseline values leaves for a metric to move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Headroom {
+    /// none | little | ok
+    pub headroom: String,
+    /// ceiling | floor, when headroom is none or little.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+impl Headroom {
+    fn new(headroom: &str, at: Option<&str>) -> Headroom {
+        Headroom { headroom: headroom.into(), at: at.map(|s| s.to_string()) }
+    }
+    pub fn ok() -> Headroom {
+        Headroom::new("ok", None)
+    }
+    pub fn is_none(&self) -> bool {
+        self.headroom == "none"
+    }
+    /// "none (ceiling)", "little (floor)", "ok".
+    pub fn describe(&self) -> String {
+        match &self.at {
+            Some(at) => format!("{} ({at})", self.headroom),
+            None => self.headroom.clone(),
+        }
+    }
+}
+
+/// Judge-score thresholds for saturation. Starting points; see
+/// docs/requirements/05-headroom-check.md.
+pub const SCORE_CEILING: f64 = 9.0;
+pub const SCORE_FLOOR: f64 = 2.0;
+const SATURATION_MIN_N: usize = 3;
+
+/// Is a cell at the metric's bound with no variance? Rates: all 0 or all 1
+/// over at least three runs. Judge scores: mean at or beyond 9 (or 2) with
+/// sd below 0.5. "Little" is within one equivalence band of the bound.
+/// Magnitudes such as cost have no bound and are always `ok`.
+pub fn saturation(xs: &[f64], info: &MetricInfo) -> Headroom {
+    if xs.len() < SATURATION_MIN_N {
+        return Headroom::ok();
+    }
+    let (m, spread) = (mean(xs), sd(xs));
+    let band = equivalence_band(info.scale, m);
+    match info.scale {
+        Scale::Rate => {
+            if m >= 1.0 - 1e-9 {
+                Headroom::new("none", Some("ceiling"))
+            } else if m <= 1e-9 {
+                Headroom::new("none", Some("floor"))
+            } else if m >= 1.0 - band {
+                Headroom::new("little", Some("ceiling"))
+            } else if m <= band {
+                Headroom::new("little", Some("floor"))
+            } else {
+                Headroom::ok()
+            }
+        }
+        Scale::Score10 => {
+            if m >= SCORE_CEILING && spread < 0.5 {
+                Headroom::new("none", Some("ceiling"))
+            } else if m <= SCORE_FLOOR && spread < 0.5 {
+                Headroom::new("none", Some("floor"))
+            } else if m >= SCORE_CEILING - band {
+                Headroom::new("little", Some("ceiling"))
+            } else if m <= SCORE_FLOOR + band {
+                Headroom::new("little", Some("floor"))
+            } else {
+                Headroom::ok()
+            }
+        }
+        Scale::Positive => Headroom::ok(),
+    }
+}
+
+/// A pairing unit is saturated when the control is at the bound and the
+/// treatment sits at the same bound: nothing moved, and nothing could have
+/// moved in the direction the bound blocks. A treatment that left the bound
+/// (a pattern that breaks a passing task) is a real effect and is kept.
+fn unit_saturated(a: &[f64], b: &[f64], info: &MetricInfo) -> bool {
+    let (sa, sb) = (saturation(a, info), saturation(b, info));
+    sa.is_none() && sb.is_none() && sa.at == sb.at
 }
 
 /// Width of the "no meaningful effect" band around zero.
@@ -205,12 +299,18 @@ pub fn equivalence_band(scale: Scale, base_mean: f64) -> f64 {
 
 /// Paired effect with a hierarchical bootstrap: resample pairing units, then
 /// resample runs within each side of each unit. Units missing either side
-/// are dropped.
+/// are dropped. Saturated units (both arms at the metric's bound) are left
+/// out of the estimate and counted; when every unit is saturated the
+/// verdict is `NoHeadroom`.
 pub fn paired_effect(units: &[(Vec<f64>, Vec<f64>)], info: &MetricInfo, seed: u64) -> Option<Effect> {
-    let units: Vec<&(Vec<f64>, Vec<f64>)> = units.iter().filter(|(a, b)| !a.is_empty() && !b.is_empty()).collect();
-    if units.is_empty() {
+    let all: Vec<&(Vec<f64>, Vec<f64>)> = units.iter().filter(|(a, b)| !a.is_empty() && !b.is_empty()).collect();
+    if all.is_empty() {
         return None;
     }
+    let open: Vec<&(Vec<f64>, Vec<f64>)> = all.iter().copied().filter(|(a, b)| !unit_saturated(a, b, info)).collect();
+    let saturated_units = all.len() - open.len();
+    let no_headroom = open.is_empty();
+    let units = if no_headroom { all } else { open };
     let deltas: Vec<f64> = units.iter().map(|(a, b)| mean(b) - mean(a)).collect();
     let effect = mean(&deltas);
     let base_mean = mean(&units.iter().map(|(a, _)| mean(a)).collect::<Vec<_>>());
@@ -233,7 +333,12 @@ pub fn paired_effect(units: &[(Vec<f64>, Vec<f64>)], info: &MetricInfo, seed: u6
     // One run per side gives a zero-width interval that proves nothing.
     let degenerate = n_a <= k && n_b <= k && k == 1;
     let band = equivalence_band(info.scale, base_mean);
-    let verdict = if degenerate {
+    // A zero-width interval at zero means every run gave the same value on
+    // both sides: no evidence of "no effect", only of no variation.
+    let flat = (ci_high - ci_low).abs() < 1e-12 && effect.abs() < 1e-12;
+    let verdict = if no_headroom {
+        Verdict::NoHeadroom
+    } else if degenerate || flat {
         Verdict::Inconclusive
     } else if ci_low > 0.0 || ci_high < 0.0 {
         let up = ci_low > 0.0;
@@ -258,6 +363,7 @@ pub fn paired_effect(units: &[(Vec<f64>, Vec<f64>)], info: &MetricInfo, seed: u6
         n_a,
         n_b,
         verdict,
+        saturated_units,
     })
 }
 
@@ -295,9 +401,13 @@ pub fn effect_difference(a: &[(Vec<f64>, Vec<f64>)], b: &[(Vec<f64>, Vec<f64>)],
     Some(Contrast { diff: point(&b) - point(&a), ci_low: lo, ci_high: hi, differs: !thin && (lo > 0.0 || hi < 0.0) })
 }
 
+/// Fewest runs in a cell before its spread says anything about flakiness.
+pub const FLAKY_MIN_N: usize = 5;
+
 /// Is this cell's spread large enough to call the task flaky on this metric?
+/// Below five runs the answer is always no: three runs that split 2 to 1 are noise.
 pub fn is_flaky(xs: &[f64], scale: Scale) -> bool {
-    if xs.len() < 3 {
+    if xs.len() < FLAKY_MIN_N {
         return false;
     }
     let m = mean(xs);
@@ -497,7 +607,54 @@ mod tests {
     fn flakiness() {
         assert!(is_flaky(&[1.0, 0.0, 1.0, 0.0, 1.0], Scale::Rate));
         assert!(!is_flaky(&[1.0, 1.0, 1.0, 1.0, 1.0], Scale::Rate));
-        assert!(is_flaky(&[2.0, 8.0, 5.0, 9.0], Scale::Score10));
-        assert!(!is_flaky(&[7.0, 8.0, 7.0, 8.0], Scale::Score10));
+        assert!(is_flaky(&[2.0, 8.0, 5.0, 9.0, 4.0], Scale::Score10));
+        assert!(!is_flaky(&[7.0, 8.0, 7.0, 8.0, 7.0], Scale::Score10));
+        // Three runs that split are too few to call.
+        assert!(!is_flaky(&[1.0, 0.0, 1.0], Scale::Rate));
+        assert!(!is_flaky(&[2.0, 8.0, 5.0, 9.0], Scale::Score10));
+    }
+
+    #[test]
+    fn saturation_levels() {
+        let (pass, score, cost) = (metric_info("pass"), metric_info("judge_score"), metric_info("cost_usd"));
+        let h = |xs: &[f64], i: &MetricInfo| saturation(xs, i).describe();
+        assert_eq!(h(&[1.0, 1.0, 1.0], &pass), "none (ceiling)");
+        assert_eq!(h(&[0.0, 0.0, 0.0, 0.0], &pass), "none (floor)");
+        assert_eq!(h(&[1.0; 2], &pass), "ok", "two runs are too few to call saturated");
+        assert_eq!(h(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0], &pass), "little (ceiling)");
+        assert_eq!(h(&[1.0, 0.0, 1.0], &pass), "ok");
+        assert_eq!(h(&[9.0, 9.0, 9.0, 9.0, 10.0], &score), "none (ceiling)");
+        assert_eq!(h(&[10.0, 8.0, 10.0], &score), "little (ceiling)", "at the bound but with spread");
+        assert_eq!(h(&[9.0, 8.0, 9.0], &score), "little (ceiling)");
+        assert_eq!(h(&[2.0, 2.0, 2.0, 1.0, 2.0], &score), "none (floor)");
+        assert_eq!(h(&[6.0, 7.0, 6.0], &score), "ok");
+        assert_eq!(h(&[0.0, 0.0, 0.0], &cost), "ok");
+    }
+
+    #[test]
+    fn saturated_units_are_dropped_and_all_saturated_is_no_headroom() {
+        let pass = metric_info("pass");
+        // Every run passes in both arms: the data cannot show a benefit.
+        let all_pass = vec![(vec![1.0; 3], vec![1.0; 3]), (vec![1.0; 5], vec![1.0; 5])];
+        let e = paired_effect(&all_pass, &pass, 1).unwrap();
+        assert_eq!(e.verdict, Verdict::NoHeadroom);
+        assert_eq!((e.units, e.saturated_units, e.effect), (2, 2, 0.0));
+        assert!(!e.verdict.is_conclusive_change());
+        // Mixed: the saturated tasks are left out and counted.
+        let mut mixed = all_pass.clone();
+        mixed.extend((0..4).map(|t| (vec![0.0, 0.0, 1.0, 0.0, 0.0], if t % 2 == 0 { vec![1.0, 1.0, 1.0, 0.0, 1.0] } else { vec![1.0; 5] })));
+        let e = paired_effect(&mixed, &pass, 1).unwrap();
+        assert_eq!((e.units, e.saturated_units), (4, 2));
+        assert_eq!(e.verdict, Verdict::Better, "{e:?}");
+        assert!(e.effect > 0.6, "the effect is over the unsaturated tasks only: {e:?}");
+        // A pattern that breaks a passing task is a real effect, not a saturated unit.
+        let broke = vec![(vec![1.0; 5], vec![0.0; 5]), (vec![1.0; 5], vec![0.0, 0.0, 1.0, 0.0, 0.0])];
+        let e = paired_effect(&broke, &pass, 1).unwrap();
+        assert_eq!((e.verdict, e.saturated_units), (Verdict::Worse, 0));
+        // Zero-width interval with several runs a side is never "no effect".
+        let flat = vec![(vec![7.0; 4], vec![7.0; 4])];
+        assert_eq!(paired_effect(&flat, &metric_info("judge_score"), 1).unwrap().verdict, Verdict::Inconclusive);
+        let two = vec![(vec![1.0; 2], vec![1.0; 2])];
+        assert_eq!(paired_effect(&two, &pass, 1).unwrap().verdict, Verdict::Inconclusive);
     }
 }

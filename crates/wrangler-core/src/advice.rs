@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 pub struct Suggestion {
     pub id: String,
     /// remove_section | review_section | keep_section | retire_pattern | drop_pattern |
-    /// keep_pattern | fix_trigger | trim_body | change_level | tradeoff | flaky_task |
-    /// more_runs | judge_bias | reviewer_flag | failures
+    /// keep_pattern | no_headroom | fix_trigger | trim_body | change_level | tradeoff |
+    /// flaky_task | more_runs | judge_bias | reviewer_flag | failures
     pub kind: String,
     /// 1 is most urgent.
     pub priority: u32,
@@ -77,6 +77,37 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
         out.push(Suggestion { id: String::new(), kind: kind.into(), priority, action, target, metric: metric.into(), evidence, confidence: confidence.into() });
     };
 
+    // ---- no headroom: a task problem, not a verdict on the pattern
+    // Built once and attached wherever a comparison came back saturated.
+    let no_headroom = |what: &str, e: &Effect| -> (String, Value) {
+        let saturated: Vec<&report::TaskBreakdown> = r.tasks.iter().filter(|t| t.headroom.is_none()).collect();
+        let floor = !saturated.is_empty() && saturated.iter().all(|t| t.headroom.at.as_deref() == Some("floor"));
+        // Quality and size metrics whose baseline still moves from run to run.
+        let base = r.variants.first();
+        let varying: Vec<String> = ["judge_score", "expectations_passed", "checks_passed", "diff_lines", "output_words", "turns"]
+            .iter()
+            .filter(|m| **m != pm && base.and_then(|v| v.metrics.get(**m)).map(|x| x.n >= 2 && x.sd > 0.0).unwrap_or(false))
+            .map(|m| m.to_string())
+            .collect();
+        let state = match (pm.as_str(), floor) {
+            ("pass", false) => "Every task passes without the pattern".to_string(),
+            ("pass", true) => "Every task fails with and without the pattern".to_string(),
+            (_, false) => format!("Every task is already at the top of {} without the pattern", pinfo.label.to_lowercase()),
+            (_, true) => format!("Every task sits at the bottom of {} with and without the pattern", pinfo.label.to_lowercase()),
+        };
+        let fix = if floor { "Add tasks the agent can sometimes do, or switch the primary metric." } else { "Add harder tasks or switch the primary metric." };
+        let alt = match (varying.is_empty(), pm.as_str()) {
+            (false, _) => format!(" Metrics that still vary here: {}.", varying.join(", ")),
+            (true, "pass") => " A judge score or a `diff_size` bound would still vary.".to_string(),
+            _ => String::new(),
+        };
+        let mut ev = evidence(e, launch_id);
+        ev["saturated_tasks"] = json!(saturated.iter().map(|t| json!({"task": t.task_id, "headroom": t.headroom.headroom, "at": t.headroom.at})).collect::<Vec<_>>());
+        ev["metrics_that_still_vary"] = json!(varying);
+        ev["suggested_metrics"] = json!(if pm == "pass" { vec!["judge_score", "diff_size bound"] } else { vec![] });
+        (format!("{state}{on_model}; the experiment cannot show {what} on {}. {fix}{alt}", pinfo.label.to_lowercase()), ev)
+    };
+
     // ---- ablation: per-section attribution
     if let Some(ab) = &r.ablation {
         let target = |s: &report::SectionAttribution| json!({"type": "section", "file": ab.source, "section": s.index + 1, "title": s.title, "lines": [s.lines.0, s.lines.1]});
@@ -100,6 +131,10 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             push("more_runs", 2, format!("The whole file's effect on {} is inconclusive ({}){on_model}, so no section can be attributed yet.{need} Adding tasks narrows the interval faster than adding repetitions when there are only {} paired task(s).", pinfo.label.to_lowercase(), ci(&pinfo, e), e.units), file_target.clone(), &pm, evidence(e, launch_id), "low");
         }
         match ab.full_effect.as_ref().map(|e| (e, e.verdict)) {
+            Some((e, Verdict::NoHeadroom)) => {
+                let (action, ev) = no_headroom(&format!("a benefit from {}", ab.source), e);
+                push("no_headroom", 1, action, file_target.clone(), &pm, ev, "high");
+            }
             Some((e, Verdict::Neutral)) => push("retire_pattern", 1, format!("Consider retiring {}: with every section in place it has no measurable effect on {} ({}){on_model}.", ab.source, pinfo.label.to_lowercase(), ci(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "medium"),
             Some((e, Verdict::Worse)) | Some((e, Verdict::Lower)) => push("retire_pattern", 1, format!("Remove {}: as a whole it {}{on_model}.", ab.source, moves(&pinfo, e)), file_target.clone(), &pm, evidence(e, launch_id), "high"),
             _ => {}
@@ -160,6 +195,10 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
                 (Verdict::Neutral, false) if cost_v == Some(Verdict::Worse) => push("change_level", 2, format!("Use {} = \"{}\" instead of \"{level}\": no measurable {label} gain ({}) and {cost_txt}.", f.name, f.levels[0], ci(&pinfo, &q.effect)), target, &pm, ev, "medium"),
                 (Verdict::Neutral, false) if cost_v == Some(Verdict::Better) => push("change_level", 3, format!("Switch {} to \"{level}\": {label} is unchanged ({}) and {cost_txt}.", f.name, ci(&pinfo, &q.effect)), target, &pm, ev, "medium"),
                 (Verdict::Better, false) => push("tradeoff", 5, format!("{} = \"{level}\" improves {label} by {} over \"{}\"; {cost_txt}.", f.name, ci(&pinfo, &q.effect), f.levels[0]), target, &pm, ev, "high"),
+                (Verdict::NoHeadroom, _) => {
+                    let (action, ev0) = no_headroom(&format!("a difference between \"{level}\" and \"{}\"", f.levels[0]), &q.effect);
+                    push("no_headroom", 1, action, target, &pm, ev0, "high");
+                }
                 (Verdict::Inconclusive, _) => {
                     if let Some(n) = runs_needed(&q.effect, r.runs_per_cell) {
                         push("more_runs", 6, format!("\"{level}\" vs \"{}\" is inconclusive on {label} ({}); about {n} runs per cell would resolve an effect of this size (now {}).", f.levels[0], ci(&pinfo, &q.effect), r.runs_per_cell), target, &pm, ev, "low");

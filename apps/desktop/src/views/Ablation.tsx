@@ -4,7 +4,7 @@ import { Report, call, fmtDelta, fmtValue, info, remember } from "../api";
 import { Empty, ErrorNote, Forest, Panel, VerdictMark, equivalenceBand } from "../components";
 import { useLoad } from "../hooks";
 
-const WORD: Record<string, string> = { carries: "carries the effect", hurts: "hurts", no_effect: "no effect", inconclusive: "inconclusive", no_data: "no data" };
+const WORD: Record<string, string> = { carries: "carries the effect", hurts: "hurts", no_effect: "no effect", inconclusive: "inconclusive", no_headroom: "no headroom", no_data: "no data" };
 
 export default function Ablation({ ctx }: { ctx: Ctx }) {
   const id = ctx.launchId;

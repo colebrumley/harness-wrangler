@@ -54,8 +54,12 @@ enum Cmd {
         /// Spending cap in USD for this launch (overrides budget_usd).
         #[arg(long)]
         budget: Option<f64>,
+        /// Run only the baseline variant, print each task's headroom, and
+        /// leave the launch for `wrangler resume` to finish.
+        #[arg(long)]
+        baseline_only: bool,
     },
-    /// Continue an interrupted or cancelled launch.
+    /// Continue an interrupted or cancelled launch, or finish one left at its baseline.
     Resume {
         launch: String,
         /// Also rerun runs that failed or timed out.
@@ -436,7 +440,7 @@ fn real_main(cli: Cli) -> Result<()> {
                 println!("warning: {w}");
             }
         }
-        Cmd::Run { experiment, reps, concurrency, no_judge, note, budget } => {
+        Cmd::Run { experiment, reps, concurrency, no_judge, note, budget, baseline_only } => {
             let mut exp = project.load_experiment(&experiment)?;
             if budget.is_some() {
                 exp.budget_usd = budget;
@@ -449,13 +453,21 @@ fn real_main(cli: Cli) -> Result<()> {
                 eprintln!("warning: {w}");
             }
             let cancel = cancel_on_sigint();
-            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed: false, budget_usd: None }, cancel, &progress_sink(json))?;
+            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed: false, budget_usd: None, baseline_only }, cancel, &progress_sink(json))?;
+            if baseline_only && !json {
+                let rep = report::build(&store, id, None)?;
+                print!("{}", report::render_headroom_text(&rep));
+                if rep.status == "baseline" {
+                    eprintln!("\nbaseline done; the other variants have not run. Finish with: wrangler resume {id}");
+                }
+                return Ok(());
+            }
             finish_run_output(&store, id, json)?;
         }
         Cmd::Resume { launch, retry_failed, concurrency, no_judge, budget } => {
             let id = store.resolve_launch(&launch)?;
             let cancel = cancel_on_sigint();
-            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed, budget_usd: budget }, cancel, &progress_sink(json))?;
+            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: no_judge, retry_failed, budget_usd: budget, baseline_only: false }, cancel, &progress_sink(json))?;
             finish_run_output(&store, id, json)?;
         }
         Cmd::Judge { launch, concurrency } => {
@@ -480,6 +492,10 @@ fn real_main(cli: Cli) -> Result<()> {
             }
             println!("{} launch #{id}: {}{}", rep.experiment, rep.status, if rep.phase.is_empty() { String::new() } else { format!(" ({})", rep.phase) });
             println!("{}/{} done · {} running · {} pending · {} failed · {} timeout · cost ${:.4} + judge ${:.4}", rep.counts.done, rep.counts.total, rep.counts.running, rep.counts.pending, rep.counts.failed, rep.counts.timeout, rep.cost_usd, rep.judge_cost_usd);
+            if rep.status == "baseline" {
+                println!("baseline phase done: only the baseline variant has run. `wrangler resume {id}` runs the other {} variant(s).", rep.variants.len().saturating_sub(1));
+                print!("{}", report::render_headroom_text(&rep));
+            }
             println!("\ncells: done/total per task × variant (cost)");
             for t in &rep.tasks {
                 println!("  {}", t.task_id);
@@ -613,7 +629,7 @@ fn real_main(cli: Cli) -> Result<()> {
             }
             SuiteCmd::Run { name, model, concurrency } => {
                 let cancel = cancel_on_sigint();
-                let launches = suite::run_model(&project, &store, &name, &model, &RunOptions { concurrency, skip_judge: false, retry_failed: false, budget_usd: None }, cancel, &progress_sink(json))?;
+                let launches = suite::run_model(&project, &store, &name, &model, &RunOptions { concurrency, skip_judge: false, retry_failed: false, budget_usd: None, baseline_only: false }, cancel, &progress_sink(json))?;
                 let dash = suite::dashboard(&project, &store, &name)?;
                 if json {
                     return print_json(&json!({"launches": launches, "dashboard": dash}));

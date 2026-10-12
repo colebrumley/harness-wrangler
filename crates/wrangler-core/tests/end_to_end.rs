@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use wrangler_core::scheduler::{self, Event, RunOptions};
 use wrangler_core::stats::Verdict;
-use wrangler_core::{report, Store};
+use wrangler_core::{advice, report, stats, Store};
 
 #[test]
 fn mock_experiment_end_to_end() {
@@ -142,4 +142,87 @@ fn cancel_and_resume() {
     scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
     assert_eq!(store.launch(launch).unwrap().status, "done");
     assert!(store.runs(launch).unwrap().iter().all(|r| r.status == "done"));
+}
+
+/// Baseline first: the first variant's runs lead the queue, `baseline_only`
+/// stops after them with the launch resumable, and a task every run passes
+/// yields "no headroom" instead of a verdict on the pattern.
+#[test]
+fn baseline_first_and_headroom() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = common::project(tmp.path());
+    // Every mock run writes SUMMARY.md, so `pass` is saturated at 1 in every arm.
+    common::write(
+        tmp.path(),
+        "experiments/saturated.toml",
+        r#"name = "saturated"
+runs_per_cell = 3
+primary_metric = "pass"
+
+[runner]
+kind = "mock"
+concurrency = 1
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/plain", "overlays/noisy"]
+
+[tasks]
+include = ["tasks/*.toml"]
+
+[graders.default]
+deterministic = [{ kind = "file_exists", path = "SUMMARY.md" }]
+"#,
+    );
+    for id in ["alpha", "bravo", "charlie"] {
+        common::write(tmp.path(), &format!("tasks/{id}.toml"), &format!("id = \"{id}\"\nprompt = \"Summarize REPORT.md into SUMMARY.md\"\nfixture = {{ dir = \"fixtures/incident\" }}\noutput_file = \"SUMMARY.md\"\n"));
+    }
+    let store = Store::open(&project.db_path()).unwrap();
+    let exp = project.load_experiment("saturated").unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    let order = Mutex::new(Vec::<String>::new());
+    let sink = |e: Event| {
+        if let Event::RunFinished { variant, .. } = e {
+            order.lock().unwrap().push(variant);
+        }
+    };
+    let no_cancel = || Arc::new(AtomicBool::new(false));
+
+    scheduler::execute(&project, &store, launch, &RunOptions { baseline_only: true, ..Default::default() }, no_cancel(), &sink).unwrap();
+    let baseline_runs = 3 * 3; // runs_per_cell × tasks
+    assert_eq!(order.lock().unwrap().len(), baseline_runs);
+    assert!(order.lock().unwrap().iter().all(|v| v == "none"));
+    assert_eq!(store.launch(launch).unwrap().status, "baseline");
+    let runs = store.runs(launch).unwrap();
+    assert_eq!(runs.iter().filter(|r| r.status == "pending").count(), 2 * baseline_runs);
+    assert!(runs.iter().filter(|r| r.status == "done").all(|r| r.variant_key == "overlay=none"));
+    let rep = report::build(&store, launch, None).unwrap();
+    assert!(rep.tasks.iter().all(|t| t.headroom.describe() == "none (ceiling)"), "{:?}", rep.tasks.iter().map(|t| t.headroom.describe()).collect::<Vec<_>>());
+    assert!(report::render_headroom_text(&rep).contains("Every task is saturated"));
+
+    // Resume finishes the rest, and a fresh launch still runs the baseline first.
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), no_cancel(), &sink).unwrap();
+    assert_eq!(store.launch(launch).unwrap().status, "done");
+    assert_eq!(order.lock().unwrap().len(), 3 * baseline_runs);
+    order.lock().unwrap().clear();
+    let (second, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, second, &RunOptions::default(), no_cancel(), &sink).unwrap();
+    let seen = order.lock().unwrap().clone();
+    assert!(seen[..baseline_runs].iter().all(|v| v == "none"), "the first {baseline_runs} runs to finish must be baseline runs: {seen:?}");
+    assert!(seen[baseline_runs..].iter().all(|v| v != "none"));
+
+    // All-pass in both arms is no headroom, not "no effect": no retire advice.
+    let rep = report::build(&store, second, None).unwrap();
+    let pass: Vec<_> = rep.comparisons.iter().filter(|c| c.metric == "pass").collect();
+    assert!(!pass.is_empty() && pass.iter().all(|c| c.effect.verdict == stats::Verdict::NoHeadroom && c.effect.saturated_units == 3), "{pass:#?}");
+    assert!(rep.warnings.iter().any(|w| w.contains("no headroom")), "{:?}", rep.warnings);
+    assert!(rep.flaky_note.as_deref().unwrap_or("").contains("too few runs"));
+    let adv = advice::build(&store, second, None).unwrap();
+    let kinds: Vec<&str> = adv.iter().map(|s| s.kind.as_str()).collect();
+    assert!(kinds.contains(&"no_headroom") && !kinds.contains(&"retire_pattern") && !kinds.contains(&"flaky_task"), "{kinds:?}");
+    let nh = adv.iter().find(|s| s.kind == "no_headroom").unwrap();
+    assert_eq!(nh.priority, 1);
+    assert!(nh.action.contains("Every task passes without the pattern") && nh.action.contains("Add harder tasks"), "{}", nh.action);
+    assert_eq!(nh.evidence["saturated_tasks"].as_array().unwrap().len(), 3);
 }

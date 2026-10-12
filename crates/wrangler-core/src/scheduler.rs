@@ -27,6 +27,9 @@ pub struct RunOptions {
     pub retry_failed: bool,
     /// Replace the launch's spending cap before running (resume after a budget stop).
     pub budget_usd: Option<f64>,
+    /// Run only the baseline variant's cells and stop with the launch in
+    /// status `baseline`; a resume runs the rest.
+    pub baseline_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,7 +78,16 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
     store.reset_incomplete(launch_id, opts.retry_failed)?;
     let all = store.runs(launch_id)?;
     let total = all.len();
-    let pending: VecDeque<RunRow> = all.iter().filter(|r| r.status == "pending").cloned().collect();
+    // Baseline first: every run of the first variant precedes every other
+    // run, so headroom is known before the variants are paid for.
+    let baseline_key = launch.variants.first().map(|v| v.key.clone()).unwrap_or_default();
+    let mut ordered: Vec<RunRow> = all.iter().filter(|r| r.status == "pending").cloned().collect();
+    ordered.sort_by_key(|r| r.variant_key != baseline_key);
+    let held_back = if opts.baseline_only { ordered.iter().filter(|r| r.variant_key != baseline_key).count() } else { 0 };
+    if opts.baseline_only {
+        ordered.retain(|r| r.variant_key == baseline_key);
+    }
+    let pending: VecDeque<RunRow> = ordered.into();
     let concurrency = opts.concurrency.unwrap_or(launch.def.runner.concurrency).clamp(1, 16);
     let mut runners: HashMap<String, Arc<dyn AgentRunner>> = HashMap::new();
     for v in &launch.variants {
@@ -176,7 +188,14 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
             sink(Event::Warning { message: format!("judge phase failed: {e:#}") });
         }
     }
-    let status = if cancel.load(Ordering::Relaxed) { "cancelled" } else { "done" };
+    // A baseline-only pass that left other variants unrun is a pause, not an end.
+    let status = if cancel.load(Ordering::Relaxed) {
+        "cancelled"
+    } else if held_back > 0 {
+        "baseline"
+    } else {
+        "done"
+    };
     store.set_launch_status(launch_id, status, "")?;
     sink(Event::Finished { launch_id, status: status.into() });
     Ok(())

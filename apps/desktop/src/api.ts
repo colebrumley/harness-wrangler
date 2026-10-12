@@ -39,8 +39,9 @@ export async function pickFolder(): Promise<string | null> {
 
 export interface MetricInfo { name: string; label: string; direction: "higher" | "lower" | "none"; scale: "rate" | "score10" | "positive"; unit: string }
 export interface Summary { n: number; mean: number; sd: number; min: number; max: number; ci_low: number; ci_high: number }
-export type Verdict = "better" | "worse" | "higher" | "lower" | "neutral" | "inconclusive";
-export interface Effect { effect: number; ci_low: number; ci_high: number; rel: number | null; base_mean: number; treat_mean: number; units: number; n_a: number; n_b: number; verdict: Verdict }
+export type Verdict = "better" | "worse" | "higher" | "lower" | "neutral" | "inconclusive" | "no_headroom";
+export interface Headroom { headroom: "none" | "little" | "ok"; at?: "ceiling" | "floor" }
+export interface Effect { effect: number; ci_low: number; ci_high: number; rel: number | null; base_mean: number; treat_mean: number; units: number; n_a: number; n_b: number; verdict: Verdict; saturated_units?: number }
 export interface Comparison extends Effect { kind: "factor" | "variant"; factor: string | null; baseline: string; level: string; variant_key: string | null; metric: string }
 export interface Contrast { diff: number; ci_low: number; ci_high: number; differs: boolean }
 export interface Conditional extends Effect { factor: string; baseline: string; level: string; by_factor: string; by_level: string; metric: string; vs_first: Contrast | null; first_level: string }
@@ -51,7 +52,7 @@ export interface Report {
   launch_id: number; experiment: string; description: string; status: string; phase: string; created_at: string; def_hash: string; runs_per_cell: number;
   counts: Counts; cost_usd: number; judge_cost_usd: number; primary_metric: string; metrics: MetricInfo[];
   factors: { name: string; kind: string; levels: string[] }[]; variants: VariantSummary[]; comparisons: Comparison[]; conditional: Conditional[];
-  tasks: { task_id: string; tags: string[]; cells: Cell[] }[]; flaky: any[]; pairwise: any | null; ablation: any | null; events: any; warnings: string[];
+  tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; events: any; warnings: string[];
 }
 export interface LaunchSummary { id: number; experiment: string; status: string; phase: string; created_at: string; finished_at: string | null; suite: string | null; note: string; runs_total: number; runs_done: number; runs_failed: number; cost_usd: number }
 

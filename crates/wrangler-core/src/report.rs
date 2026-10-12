@@ -2,7 +2,7 @@
 //! from the store on demand.
 
 use crate::model::*;
-use crate::stats::{self, Bout, BtItem, Contrast, Direction, Effect, MetricInfo, Summary, Verdict};
+use crate::stats::{self, Bout, BtItem, Contrast, Direction, Effect, Headroom, MetricInfo, Summary, Verdict};
 use crate::store::{Judgment, Launch, RunRow, Store};
 use crate::util::hash_u64;
 use anyhow::Result;
@@ -85,6 +85,11 @@ pub struct Cell {
 pub struct TaskBreakdown {
     pub task_id: String,
     pub tags: Vec<String>,
+    /// Room the baseline cell leaves on the primary metric: none, little or
+    /// ok, and whether it sits at the ceiling or the floor.
+    pub headroom: Headroom,
+    /// The same for each quality metric that has a bound.
+    pub headroom_by_metric: BTreeMap<String, Headroom>,
     pub cells: Vec<Cell>,
 }
 
@@ -168,7 +173,7 @@ pub struct SectionAttribution {
     pub lines: (usize, usize),
     /// full − without-this-section on the primary metric. Positive means the section contributes.
     pub effect: Option<Effect>,
-    /// carries | hurts | no_effect | inconclusive | no_data
+    /// carries | hurts | no_effect | inconclusive | no_headroom | no_data
     pub attribution: String,
     /// full − without-this-section on cost and tokens: what the section costs per run.
     pub cost_effect: Option<Effect>,
@@ -219,6 +224,8 @@ pub struct Report {
     pub conditional: Vec<Conditional>,
     pub tasks: Vec<TaskBreakdown>,
     pub flaky: Vec<Flaky>,
+    /// Set when cells have too few runs for flakiness to be judged.
+    pub flaky_note: Option<String>,
     pub pairwise: Option<Pairwise>,
     pub ablation: Option<AblationReport>,
     pub events: EventCounts,
@@ -442,7 +449,24 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
                 run_ids: cell_runs.iter().map(|r| r.id).collect(),
             });
         }
-        tasks.push(TaskBreakdown { task_id: t.id.clone(), tags: t.tags.clone(), cells });
+        // Headroom is read off the baseline cell: the first variant.
+        let base_key = launch.variants.first().map(|v| v.key.as_str()).unwrap_or("");
+        let room = |m: &str| stats::saturation(&data.values(m, &|r| r.task_id == t.id && r.variant_key == base_key), &stats::metric_info(m));
+        let headroom_by_metric: BTreeMap<String, Headroom> = metric_names.iter().filter(|m| stats::metric_info(m).scale != stats::Scale::Positive && stats::metric_info(m).direction == Direction::Higher).map(|m| (m.clone(), room(m))).collect();
+        tasks.push(TaskBreakdown { task_id: t.id.clone(), tags: t.tags.clone(), headroom: room(&primary), headroom_by_metric, cells });
+    }
+    let small_cells = tasks.iter().flat_map(|t| &t.cells).filter(|c| c.counts.done >= 2 && c.counts.done < stats::FLAKY_MIN_N).count();
+    let flaky_note = (small_cells > 0).then(|| format!("too few runs to judge flakiness ({small_cells} cell(s) with fewer than {} runs)", stats::FLAKY_MIN_N));
+    let saturated: Vec<&TaskBreakdown> = tasks.iter().filter(|t| t.headroom.is_none()).collect();
+    if !saturated.is_empty() {
+        let pinfo = stats::metric_info(&primary);
+        let at = |w: &str| saturated.iter().filter(|t| t.headroom.at.as_deref() == Some(w)).map(|t| t.task_id.as_str()).collect::<Vec<_>>();
+        for (side, what) in [("ceiling", "already at the top"), ("floor", "at the bottom")] {
+            let ids = at(side);
+            if !ids.is_empty() {
+                warnings.push(format!("no headroom on {} for {} of {} task(s): the baseline is {what} with no variance ({}). Comparisons leave a task out when the other variant sits at the same bound.", pinfo.label.to_lowercase(), ids.len(), tasks.len(), ids.join(", ")));
+            }
+        }
     }
 
     let mut events = EventCounts::default();
@@ -501,6 +525,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         conditional,
         tasks,
         flaky,
+        flaky_note,
         pairwise,
         ablation,
         events,
@@ -639,6 +664,7 @@ fn build_ablation(data: &Data, meta: &AblationMeta, metric: &str) -> AblationRep
                 Some(Verdict::Worse) | Some(Verdict::Lower) => "hurts",
                 Some(Verdict::Neutral) => "no_effect",
                 Some(Verdict::Inconclusive) => "inconclusive",
+                Some(Verdict::NoHeadroom) => "no_headroom",
             };
             SectionAttribution {
                 index: s.index,
@@ -693,7 +719,35 @@ pub fn fmt_delta(info: &MetricInfo, v: f64) -> String {
 }
 
 pub fn fmt_effect(info: &MetricInfo, e: &Effect) -> String {
-    format!("{} [{}, {}] {}", fmt_delta(info, e.effect), fmt_delta(info, e.ci_low), fmt_delta(info, e.ci_high), e.verdict.as_str())
+    let dropped = if e.saturated_units > 0 && e.verdict != Verdict::NoHeadroom { format!(" ({} saturated left out)", e.saturated_units) } else { String::new() };
+    format!("{} [{}, {}] {}{dropped}", fmt_delta(info, e.effect), fmt_delta(info, e.ci_low), fmt_delta(info, e.ci_high), e.verdict.as_str())
+}
+
+/// Per-task headroom and spread of the baseline cells: what a
+/// baseline-only run is for.
+pub fn render_headroom_text(r: &Report) -> String {
+    let pm = stats::metric_info(&r.primary_metric);
+    let base = r.variants.first().map(|v| v.label.clone()).unwrap_or_default();
+    let mut s = format!("\nHEADROOM (baseline \"{base}\"; {})\n", pm.label);
+    let mut rows = vec![vec!["task".into(), "baseline".into(), "sd".into(), "n".into(), "headroom".into()]];
+    for t in &r.tasks {
+        let cell = t.cells.first().and_then(|c| c.metrics.get(&r.primary_metric));
+        rows.push(vec![
+            t.task_id.clone(),
+            cell.map(|x| fmt_value(&pm, x.mean)).unwrap_or_else(|| "–".into()),
+            cell.map(|x| fmt_value(&pm, x.sd).trim_start_matches('$').to_string()).unwrap_or_else(|| "–".into()),
+            cell.map(|x| x.n.to_string()).unwrap_or_else(|| "0".into()),
+            if cell.is_some() { t.headroom.describe() } else { "not run".into() },
+        ]);
+    }
+    s.push_str(&table(&rows));
+    let none = r.tasks.iter().filter(|t| t.headroom.is_none()).count();
+    if none == r.tasks.len() && none > 0 {
+        s.push_str("Every task is saturated: this experiment cannot show a difference on this metric. Add harder tasks or pick a metric that still varies.\n");
+    } else if none > 0 {
+        s.push_str(&format!("{none} of {} task(s) cannot show a difference on this metric.\n", r.tasks.len()));
+    }
+    s
 }
 
 fn table(rows: &[Vec<String>]) -> String {
@@ -773,9 +827,9 @@ pub fn render_text(r: &Report) -> String {
     let pm = info(&r.primary_metric);
     if r.tasks.len() > 1 || r.variants.len() > 1 {
         s.push_str(&format!("\nPER TASK ({}; * = flaky)\n", pm.label));
-        let mut rows = vec![std::iter::once("task".to_string()).chain(r.variants.iter().map(|v| v.label.clone())).collect::<Vec<_>>()];
+        let mut rows = vec![std::iter::once("task".to_string()).chain(std::iter::once("headroom".to_string())).chain(r.variants.iter().map(|v| v.label.clone())).collect::<Vec<_>>()];
         for t in &r.tasks {
-            let mut row = vec![t.task_id.clone()];
+            let mut row = vec![t.task_id.clone(), t.headroom.describe()];
             for c in &t.cells {
                 let star = if c.flaky.contains(&r.primary_metric) { "*" } else { "" };
                 row.push(c.metrics.get(&r.primary_metric).map(|x| format!("{}{star} (n={})", fmt_value(&pm, x.mean), x.n)).unwrap_or_else(|| "–".into()));
@@ -783,6 +837,9 @@ pub fn render_text(r: &Report) -> String {
             rows.push(row);
         }
         s.push_str(&table(&rows));
+    }
+    if let Some(note) = &r.flaky_note {
+        s.push_str(&format!("note: {note}\n"));
     }
     if !r.flaky.is_empty() {
         s.push_str("\nFLAKY CELLS\n");

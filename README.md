@@ -72,8 +72,8 @@ Run commands inside a project folder, or pass `-C <dir>`. Every command takes `-
 | `wrangler doctor` | Check the runner CLIs are installed. |
 | `wrangler list experiments\|tasks\|overlays\|launches\|suites` | List things. |
 | `wrangler validate <experiment>` | Check a definition and show its cells. Runs nothing. |
-| `wrangler run <experiment> [--reps N] [--concurrency N] [--no-judge] [--budget USD]` | Run every cell, grade, judge, print the report. Ctrl-C stops cleanly. |
-| `wrangler resume <launch> [--retry-failed] [--budget USD]` | Finish an interrupted launch. |
+| `wrangler run <experiment> [--reps N] [--concurrency N] [--no-judge] [--budget USD] [--baseline-only]` | Run every cell, grade, judge, print the report. Ctrl-C stops cleanly. Baseline runs go first; `--baseline-only` stops after them and prints per-task headroom. |
+| `wrangler resume <launch> [--retry-failed] [--budget USD]` | Finish an interrupted launch, or run the variants of one left at its baseline. |
 | `wrangler judge <launch>` | Run or finish the LLM judge phase. |
 | `wrangler status <launch>` | Per-cell progress and cost. |
 | `wrangler report <launch\|experiment> [--metric m]` | Variants, factor effects with 95% CIs, per-task table, pairwise, ablation. |
@@ -133,6 +133,8 @@ The report then shows the skill's effect within each model, and for each later m
 - Comparisons are paired by task, and by the other factors when there are several. The effect is the mean of per-pair differences.
 - Confidence intervals are 95% hierarchical bootstraps: resample the pairs, then the runs within each side. Resampling is seeded, so a report is reproducible.
 - A comparison whose interval spans zero is "inconclusive", or "no effect" when the whole interval sits inside a small band (10 points for rates, 0.5 for judge scores, 10% of baseline for cost and time).
+- Headroom: a task whose baseline is at the metric's bound with no variance (every run passes, or judge scores of 9 and up with almost no spread) cannot show a difference. Comparisons leave such a task out when the other variant sits at the same bound, and say how many were left out. When every task is saturated the verdict is "no headroom", which counts as inconclusive, never as "no effect". `wrangler run <experiment> --baseline-only` runs the baseline alone and prints each task's headroom before the variants are paid for.
+- A cell needs five runs before its spread is called flaky.
 - Pairwise judging runs both orders. A win counts only when both orders agree; the disagreement rate is the position-bias check.
 - With more than two variants, pairwise votes are aggregated with a Bradley–Terry model.
 
