@@ -12,7 +12,7 @@ Controlled experiments over coding-agent harness patterns. It measures whether s
 | `crates/wrangler-cli` | The `wrangler` CLI. Text for people, `--json` for agents and CI. |
 | `apps/desktop` | The desktop app: Tauri 2 shell plus a TypeScript frontend. |
 | `examples/` | A ready project: tasks, overlays (including a copy of `reader-first-writing` 1.1.0), experiments, and suites. |
-| `docs/` | [File formats](docs/formats.md), [isolation and what was measured](docs/isolation.md). |
+| `docs/` | [File formats](docs/formats.md), [isolation and what was measured](docs/isolation.md), [requirements for the next round](docs/requirements/README.md). |
 
 ## Build
 
