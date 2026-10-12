@@ -23,7 +23,28 @@ claude -p --setting-sources project --strict-mcp-config --no-session-persistence
 | Does it suppress MCP servers? | No. claude.ai connectors still load. | The spike's `init` event listed six connectors. `--strict-mcp-config` removes them; the test asserts `mcp_servers` is empty. |
 | Is `--max-turns` honored? | Yes, though it is not in `--help`. | A run stopped with `error_max_turns`. Such runs are graded as they stand and counted with timeouts. |
 
-Stdin is closed for every run; otherwise `claude -p` waits three seconds for piped input.
+Stdin is closed for every single-prompt run; otherwise `claude -p` waits three seconds for piped input.
+
+### Conversation tasks: stdin held open
+
+A task with a `[conversation]` runs as one process and one session:
+
+```
+claude -p ... --input-format stream-json --output-format stream-json --verbose --include-hook-events
+```
+
+The prompt is not an argument. Each user turn is written to stdin as `{"type":"user","message":{"role":"user","content":"..."}}`, and stdin stays open between turns. Measured on Claude Code 2.1.296:
+
+| Question | Answer |
+|---|---|
+| Does one process keep one session across user messages? | Yes. The `session_id` is the same on every event, and the second turn's request reads the first turn's context from cache. |
+| How is the end of the agent's turn detected? | A `result` event closes each turn. A new `system`/`init` event opens the next. |
+| What do the `result` fields mean across turns? | `total_cost_usd` and `duration_api_ms` are running totals; `num_turns`, `duration_ms` and `usage` are for that turn alone. The runner keeps the last cost and adds up the rest. |
+| Are stdin messages echoed on stdout? | No (not without `--replay-user-messages`). The runner puts the prompt and each simulated reply back into the transcript where it was sent. |
+| How does the run end? | Closing stdin after a `result` lets the process exit on its own. The runner waits up to 20 seconds, then terminates the process group. |
+| Does the seatbelt profile need new paths? | No. The live dialog test runs under `isolation = "seatbelt"` with `network = "anthropic"` and the profile above. |
+
+The `--resume` fallback considered in the requirements (one process per user turn, with session persistence) was not needed.
 
 ## Seatbelt
 

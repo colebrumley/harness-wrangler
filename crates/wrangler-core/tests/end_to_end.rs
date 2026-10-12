@@ -256,3 +256,106 @@ deterministic = [{ kind = "file_exists", path = "SUMMARY.md" }]
     assert!(nh.action.contains("Every task passes without the pattern") && nh.action.contains("Add harder tasks"), "{}", nh.action);
     assert_eq!(nh.evidence["saturated_tasks"].as_array().unwrap().len(), 3);
 }
+
+/// A conversation task: a scripted simulated user drives the mock runner
+/// through three turns. The transcript marks the simulated turns, the run
+/// carries the dialog metrics, and judges and reviewers are shown the dialog.
+#[test]
+fn simulated_user_drives_a_dialog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = common::project(tmp.path());
+    common::write(tmp.path(), "overlays/ask/CLAUDE.md", "Ask one question before changing anything when the task is underspecified.\nmock-ask: Which report should I summarize?\n");
+    common::write(
+        tmp.path(),
+        "tasks/talk/vague.toml",
+        r#"id = "vague"
+prompt = "Something needs summarizing. Do it."
+fixture = { dir = "fixtures/incident" }
+output_file = "SUMMARY.md"
+expectations = ["Summarizes REPORT.md"]
+
+[conversation]
+persona = "A busy maintainer who answers in one line."
+hidden = """
+The file is REPORT.md.
+mock-reply: REPORT.md.
+mock-reply: Keep it under 100 words.
+mock-reply: !Also, the outage was the cache, since you did not ask.
+"""
+max_user_turns = 6
+model = "mock"
+done_when = "The agent reports the summary is written and asks for nothing more."
+
+[graders]
+deterministic = [{ kind = "transcript_regex", pattern = "under 100 words", scope = "all", name = "user-was-heard" }, { kind = "sequence", steps = [{ name = "Write" }] }]
+"#,
+    );
+    common::write(
+        tmp.path(),
+        "experiments/talk.toml",
+        "name = \"talk\"\nruns_per_cell = 2\nbudget_usd = 50.0\n[runner]\nkind = \"mock\"\n[[factors]]\nname = \"overlay\"\nkind = \"overlay\"\nlevels = [\"overlays/none\", \"overlays/ask\"]\n[tasks]\ninclude = [\"tasks/talk/*.toml\"]\n[graders.default]\njudge = { model = \"mock\", pairwise = true }\nhuman = { enabled = true }\n",
+    );
+    let exp = project.load_experiment("talk").unwrap();
+    let warnings = project.validate(&exp).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("simulator variance")), "{warnings:?}");
+    // Codex cannot hold a dialog in this round: the loader refuses, with the reason.
+    let mut codex = exp.clone();
+    codex.runner.kind = "codex".into();
+    let err = format!("{:#}", project.validate(&codex).unwrap_err());
+    assert!(err.contains("task `vague` is a conversation, which runner `codex` cannot run"), "{err}");
+
+    let store = Store::open(&project.db_path()).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let runs = store.runs(launch).unwrap();
+    assert!(runs.iter().all(|r| r.status == "done"), "{:?}", runs.iter().map(|r| (&r.status, &r.error)).collect::<Vec<_>>());
+    let metrics = store.metrics_for_launch(launch).unwrap();
+    for r in &runs {
+        let t = scheduler::load_transcript(r);
+        let m = &metrics[&r.id];
+        // Three scripted replies, each marked as simulated; the opening prompt is the user's own.
+        assert_eq!(t.user_turns(), 3);
+        assert_eq!((m["user_turns"], m["user_satisfied"], m["hidden_revealed"]), (3.0, 1.0, 1.0));
+        assert_eq!((t.turns[0].role.as_str(), t.turns[0].simulated, t.turns[0].text.as_str()), ("user", false, "Something needs summarizing. Do it."));
+        assert_eq!(t.turns.iter().filter(|x| x.simulated).map(|x| x.text.as_str()).collect::<Vec<_>>(), vec!["REPORT.md.", "Keep it under 100 words.", "Also, the outage was the cache, since you did not ask."]);
+        let asked = r.variant_key == "overlay=ask";
+        assert_eq!(m["questions_asked"], if asked { 1.0 } else { 0.0 }, "the overlay that asks is the one that asks");
+        // Transcript graders work over the dialog, user turns included.
+        assert_eq!(m["check.user-was-heard"], 1.0);
+        assert_eq!(m["check.sequence"], 1.0);
+        // The simulator's settings are stored with the run.
+        let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(&r.dir).join("meta.json")).unwrap()).unwrap();
+        assert_eq!((meta["conversation"]["model"].as_str(), meta["conversation"]["stop"].as_str(), meta["conversation"]["user_turns"].as_u64()), (Some("mock"), Some("done"), Some(3)));
+        assert!(meta["conversation"]["persona"].as_str().unwrap().contains("busy maintainer"));
+        if asked {
+            assert_eq!(t.turns.iter().find(|x| x.role == "assistant" && !x.text.is_empty()).unwrap().text, "Which report should I summarize?");
+        }
+    }
+    // Judges and reviewers see the whole dialog.
+    let task = &store.launch(launch).unwrap().tasks[0];
+    let shown = scheduler::shown_for(&runs[1], task);
+    assert!(shown.dialog.contains("[user] Something needs summarizing.") && shown.dialog.contains("[user (simulated)] Keep it under 100 words."), "{}", shown.dialog);
+    let item = wrangler_core::review::next(&store, launch).unwrap().expect("a pair to review");
+    assert!(item.left.dialog.iter().any(|l| l.simulated && l.role == "user") && item.left.dialog[0].role == "user" && !item.left.dialog[0].simulated);
+    let rep = report::build(&store, launch, None).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("simulator variance")) && rep.warnings.iter().any(|w| w.contains("gave away hidden information")));
+    assert!(rep.metrics.iter().any(|m| m.name == "questions_asked") && rep.metrics.iter().any(|m| m.name == "user_turns"));
+    let q = rep.comparisons.iter().find(|c| c.metric == "questions_asked" && c.level == "ask").unwrap();
+    assert_eq!(q.effect.effect, 1.0);
+
+    // The reply budget: two replies allowed, three scripted. The run stops and is graded as it stands.
+    let path = tmp.path().join("tasks/talk/vague.toml");
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("max_user_turns = 6", "max_user_turns = 2")).unwrap();
+    let exp = project.load_experiment("talk").unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions { skip_judge: true, ..Default::default() }, Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let runs = store.runs(launch).unwrap();
+    let metrics = store.metrics_for_launch(launch).unwrap();
+    for r in &runs {
+        assert_eq!(r.status, "timeout");
+        assert!(r.error.contains("max_user_turns (2)"), "{}", r.error);
+        let m = &metrics[&r.id];
+        assert_eq!((m["user_turns"], m["user_satisfied"]), (2.0, 0.0));
+        assert!(m.contains_key("pass"), "a run stopped at the budget is still graded");
+    }
+}

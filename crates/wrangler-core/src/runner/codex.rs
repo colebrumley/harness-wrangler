@@ -67,8 +67,10 @@ impl AgentRunner for CodexRunner {
             effort: Support::Full,
             system_prompt_append: Support::Approximate("appended to the workspace AGENTS.md, not the system prompt"),
             knob: Support::Full,
+            mcp: Support::Approximate("the config is translated into [mcp_servers] of a per-run CODEX_HOME/config.toml; stdio servers only"),
             seatbelt: Support::Approximate("Codex applies its own workspace-write seatbelt sandbox; the network policy setting is not applied"),
             hooks: Support::Unsupported("Codex does not run Claude Code hooks, so there is nothing to report"),
+            conversation: Support::Unsupported("the Codex runner sends one prompt per run; conversation tasks need Claude Code in this round"),
             reports_cost: false,
         }
     }

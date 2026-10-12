@@ -6,6 +6,13 @@
 //! - `mock-effect: 0.2` adds to quality (may be negative).
 //! - `mock-trigger: never` makes the skill go uninvoked.
 //!
+//! - `mock-ask: <question>` makes the agent open a conversation task by
+//!   asking that question before it does anything.
+//!
+//! On a conversation task the mock agent writes its file, reports, and then
+//! answers each simulated reply with one more message until the simulated
+//! user is done.
+//!
 //! On a trigger task (`trigger = "should" | "should_not"`) a skill fires
 //! only when the prompt contains a word from its description, so trigger
 //! experiments have precision and recall worth looking at.
@@ -44,8 +51,10 @@ impl AgentRunner for MockRunner {
             effort: Support::Full,
             system_prompt_append: Support::Full,
             knob: Support::Full,
+            mcp: Support::Full,
             seatbelt: Support::Approximate("the mock runner starts no process, so nothing is sandboxed"),
             hooks: Support::Unsupported("the mock runner runs no hooks"),
+            conversation: Support::Full,
             reports_cost: true,
         }
     }
@@ -165,8 +174,35 @@ impl AgentRunner for MockRunner {
             tool_results: vec![ToolResult { tool_use_id: "call_write".into(), content: "File created".into(), is_error: false }],
             ..Default::default()
         });
-        let final_text = format!("Wrote {out_file} ({words} words). QUALITY={quality:.3}");
-        turns.push(Turn { role: "assistant".into(), text: final_text.clone(), ..Default::default() });
+        let mut final_text = format!("Wrote {out_file} ({words} words). QUALITY={quality:.3}");
+        let mut dialog = match (&task.conversation, &limits.simulator) {
+            (Some(conv), Some((model, effort))) => Some(crate::simulator::Dialog::new(task, conv, model, effort.clone(), &limits.cancel)),
+            (Some(_), None) => bail!("task `{}` is a conversation but no simulator model is set (conversation.model, or a judge model)", task.id),
+            _ => None,
+        };
+        match dialog.as_mut() {
+            None => turns.push(Turn { role: "assistant".into(), text: final_text.clone(), ..Default::default() }),
+            Some(d) => {
+                // The opening prompt, then the agent's turns with the simulated replies between them.
+                turns.insert(0, Turn { role: "user".into(), text: task.prompt.clone(), ..Default::default() });
+                let question = sources.iter().flat_map(|(_, text)| directive(text, "mock-ask:")).next();
+                let mut say = match &question {
+                    // Asking first: the file is already written above, as if the agent had peeked.
+                    Some(q) => q.clone(),
+                    None => final_text.clone(),
+                };
+                for step in 0..50 {
+                    turns.push(Turn { role: "assistant".into(), text: say.clone(), ..Default::default() });
+                    let tools = if step == 0 { vec!["Write".to_string()] } else { vec![] };
+                    match d.agent_turn_ended(&say, tools)? {
+                        Some(reply) => turns.push(Turn { role: "user".into(), text: reply, simulated: true, ..Default::default() }),
+                        None => break,
+                    }
+                    say = if step == 0 && question.is_some() { final_text.clone() } else { format!("Understood. Step {} done. QUALITY={quality:.3}", step + 1) };
+                }
+                final_text = turns.iter().rev().find(|t| t.role == "assistant" && !t.text.is_empty()).map(|t| t.text.clone()).unwrap_or(final_text);
+            }
+        }
 
         let input = 9000.0 + overlay_chars as f64 / 4.0;
         let output = words as f64 * 1.4 * effort_mult;
@@ -195,6 +231,10 @@ impl AgentRunner for MockRunner {
             std::thread::sleep(Duration::from_millis(20));
         }
         rec.transcript = Transcript { turns };
+        if let Some(d) = &dialog {
+            d.finish(&mut rec);
+            rec.conversation = d.record();
+        }
         tally_tool_calls(&rec.transcript, &mut rec.metrics);
         rec.raw_output = serde_json::to_string(&rec.transcript)?;
         rec.final_text = final_text;

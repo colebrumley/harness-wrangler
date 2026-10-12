@@ -303,6 +303,9 @@ pub struct Report {
     pub counts: Counts,
     pub cost_usd: f64,
     pub judge_cost_usd: f64,
+    /// What the simulated user's replies cost, for conversation tasks.
+    #[serde(default)]
+    pub simulator_cost_usd: f64,
     pub primary_metric: String,
     pub metrics: Vec<MetricInfo>,
     pub factors: Vec<FactorInfo>,
@@ -619,6 +622,14 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
     if counts.failed > 0 {
         warnings.push(format!("{} run(s) failed and are excluded from quality metrics", counts.failed));
     }
+    let talks = launch.tasks.iter().filter(|t| t.conversation.is_some()).count();
+    if talks > 0 {
+        warnings.push(format!("{talks} task(s) are conversations with a simulated user: two runs of a cell differ by agent and by simulator, so every comparison here includes simulator variance"));
+        let volunteered: f64 = data.metrics.values().filter_map(|m| m.get("hidden_revealed")).sum();
+        if volunteered > 0.0 {
+            warnings.push(format!("the simulated user gave away hidden information unasked {volunteered:.0} time(s); runs where it did are easier than the task intends (metric `hidden_revealed`)"));
+        }
+    }
     if counts.timeout > 0 {
         warnings.push(format!("{} run(s) timed out", counts.timeout));
     }
@@ -653,6 +664,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         counts,
         cost_usd: sum("cost_usd"),
         judge_cost_usd: sum("judge_cost_usd") + judgments.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum::<f64>() + 0.0,
+        simulator_cost_usd: sum("simulator_cost_usd"),
         primary_metric: primary,
         metrics: metric_names.iter().map(|m| stats::metric_info(m)).collect(),
         factors: exp.factors.iter().map(|f| FactorInfo { name: f.name.clone(), kind: f.kind.as_str().into(), levels: f.levels.iter().map(|l| l.label()).collect() }).collect(),
@@ -980,14 +992,22 @@ pub fn render_text(r: &Report) -> String {
         s.push_str(&format!("{}\n", r.description));
     }
     s.push_str(&format!(
-        "runs: {}/{} done, {} failed, {} timeout, {} pending · agent cost ${:.4} · judge cost ${:.4} · primary metric: {}\n",
-        r.counts.done, r.counts.total, r.counts.failed, r.counts.timeout, r.counts.pending + r.counts.running, r.cost_usd, r.judge_cost_usd, r.primary_metric
+        "runs: {}/{} done, {} failed, {} timeout, {} pending · agent cost ${:.4} · judge cost ${:.4}{} · primary metric: {}\n",
+        r.counts.done,
+        r.counts.total,
+        r.counts.failed,
+        r.counts.timeout,
+        r.counts.pending + r.counts.running,
+        r.cost_usd,
+        r.judge_cost_usd,
+        if r.simulator_cost_usd > 0.0 { format!(" · simulated user ${:.4}", r.simulator_cost_usd) } else { String::new() },
+        r.primary_metric
     ));
     for w in &r.warnings {
         s.push_str(&format!("warning: {w}\n"));
     }
 
-    let shown: Vec<&MetricInfo> = r.metrics.iter().filter(|m| ["pass", "judge_score", "expectations_passed", "skill_invoked", "cost_usd", "wall_time_s", "total_tokens", "turns"].contains(&m.name.as_str()) || m.name == r.primary_metric).collect();
+    let shown: Vec<&MetricInfo> = r.metrics.iter().filter(|m| ["pass", "judge_score", "expectations_passed", "skill_invoked", "user_satisfied", "questions_asked", "user_turns", "cost_usd", "wall_time_s", "total_tokens", "turns"].contains(&m.name.as_str()) || m.name == r.primary_metric).collect();
     s.push_str("\nVARIANTS (mean ± sd)\n");
     let mut rows = vec![std::iter::once("variant".to_string()).chain(std::iter::once("n".into())).chain(shown.iter().map(|m| m.label.clone())).collect::<Vec<_>>()];
     for v in &r.variants {

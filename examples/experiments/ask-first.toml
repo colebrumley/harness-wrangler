@@ -1,0 +1,24 @@
+name = "ask-first"
+description = "Does a one-line 'ask before changing code' rule make the agent ask when the task is ambiguous, and what does the question cost? A simulated user answers."
+runs_per_cell = 5
+timeout_secs = 600
+isolation = "seatbelt"
+network = "anthropic"
+primary_metric = "questions_asked"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+model = "claude-haiku-5-5"
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/none", "overlays/ask-first"]
+
+[tasks]
+include = ["tasks/coding/fix-slugify-ambiguous.toml"]
+
+# The judge model also plays the user unless the task's [conversation] names one.
+[graders.default]
+judge = { model = "claude-sonnet-5-5" }

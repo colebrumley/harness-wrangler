@@ -44,6 +44,7 @@ export default function Results({ ctx }: { ctx: Ctx }) {
           <div><span>Failed or timed out</span><b>{r.counts.failed + r.counts.timeout}</b></div>
           <div><span>Agent cost</span><b>{usd(r.cost_usd)}</b></div>
           <div><span>Judge cost</span><b>{usd(r.judge_cost_usd)}</b></div>
+          {r.simulator_cost_usd > 0 && <div><span>Simulated user cost</span><b>{usd(r.simulator_cost_usd)}</b></div>}
           <div><span>Runs per cell</span><b>{r.runs_per_cell}</b></div>
           <div><span>Definition</span><b className="mono">{r.def_hash}</b></div>
         </div>

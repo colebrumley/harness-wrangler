@@ -26,7 +26,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [show, setShow] = useState<"output" | "diff">("output");
+  const [show, setShow] = useState<"output" | "diff" | "dialog">("output");
   const [auto, setAuto] = useState(() => localStorage.getItem("review.auto") === "1");
   // Calibration mode serves pairs the judge has voted on, its shakiest calls first.
   const [mode, setModeState] = useState<"compare" | "calibration">(() => (localStorage.getItem("review.mode") === "calibration" ? "calibration" : "compare"));
@@ -41,7 +41,8 @@ export default function Review({ ctx }: { ctx: Ctx }) {
     try {
       const r = await call("review_next", { launch_id: id, mode });
       setItem(r.item); setProgress(r.progress); setReveal(null); setVoted(null); setReason(""); setError(null);
-      setShow(r.item && !r.item.left.output.trim() && r.item.left.diff ? "diff" : "output");
+      // A conversation opens on the dialog: what was asked and answered is the thing to judge.
+      setShow(r.item?.left.dialog?.length ? "dialog" : r.item && !r.item.left.output.trim() && r.item.left.diff ? "diff" : "output");
     } catch (e: any) { setError(String(e.message ?? e)); }
     setLoaded(true);
   }, [id, mode]);
@@ -80,6 +81,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
       else if (k === "x") vote("both_bad");
       else if (k === "s") vote("skip");
       else if (k === "d") setShow((v) => (v === "output" ? "diff" : "output"));
+      else if (k === "c" && item?.left.dialog?.length) setShow("dialog");
       else if (k === "r") { e.preventDefault(); reasonRef.current?.focus(); }
     };
     window.addEventListener("keydown", on);
@@ -122,9 +124,11 @@ export default function Review({ ctx }: { ctx: Ctx }) {
 
   const setAnn = (side: "left" | "right") => (all: Annotation[]) => setItem((it: any) => ({ ...it, [side]: { ...it[side], annotations: all } }));
   const hasDiff = !!(item.left.diff || item.right.diff);
+  const hasDialog = !!(item.left.dialog?.length || item.right.dialog?.length);
   const pane = (side: "left" | "right", letter: string) => {
     const s = item[side];
     const text = show === "diff" ? s.diff : s.output;
+    const dialog: any[] = s.dialog ?? [];
     return (
       <div className={`pane ${voted === side ? "won" : ""}`}>
         <header>
@@ -137,7 +141,14 @@ export default function Review({ ctx }: { ctx: Ctx }) {
           <button className="btn quiet sm" onClick={() => ctx.openRun(s.run_id, !reveal)}>How it got there</button>
         </header>
         <div className="scroll">
-          {text ? <TextLines text={text} kind={show} annotations={s.annotations} runId={s.run_id} onChange={setAnn(side)} /> : <p className="muted" style={{ paddingLeft: 38 }}>{show === "diff" ? "No other files changed." : "No output."}</p>}
+          {show === "dialog"
+            ? <div style={{ padding: "8px 14px" }}>{dialog.map((l, i) => (
+                <div key={i} className={`turn ${l.role === "user" ? "user" : "assistant"}${l.simulated ? " simulated" : ""}`}>
+                  <div className="who">{l.role === "user" ? (l.simulated ? "user (simulated)" : "user") : "agent"}</div>
+                  <div className="text">{l.text}</div>
+                </div>
+              ))}</div>
+            : text ? <TextLines text={text} kind={show} annotations={s.annotations} runId={s.run_id} onChange={setAnn(side)} /> : <p className="muted" style={{ paddingLeft: 38 }}>{show === "diff" ? "No other files changed." : "No output."}</p>}
         </div>
       </div>
     );
@@ -164,7 +175,7 @@ export default function Review({ ctx }: { ctx: Ctx }) {
             </div>
             <div className="row">
               <Seg options={[["compare", "Settle the comparison"], ["calibration", "Calibrate the judge"]]} value={mode} onChange={setMode} />
-              {hasDiff && <Seg options={[["output", item.output_file ?? "Final message"], ["diff", "Other changes"]]} value={show} onChange={setShow} />}
+              {(hasDiff || hasDialog) && <Seg options={[...(hasDialog ? [["dialog", "Dialog"] as [string, string]] : []), ["output", item.output_file ?? "Final message"] as [string, string], ...(hasDiff ? [["diff", hasDialog ? "Diff" : "Other changes"] as [string, string]] : [])] as any} value={show} onChange={setShow as any} />}
             </div>
           </div>
           {item.task_votes > 0 && <p className="muted small" style={{ marginTop: 4 }}>You have reviewed this task before. These are two different results for it, not the pair you already voted on.</p>}

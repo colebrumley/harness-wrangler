@@ -149,6 +149,38 @@ Every grader takes an optional `name`. Give a fixture a `.gitignore` for build d
 
 Every grader takes an optional `name`. The baseline commit is tagged `wrangler-baseline`, so a command grader can check `git diff --quiet wrangler-baseline -- tests`.
 
+## Conversation tasks
+
+A single-prompt run cannot show whether a pattern makes the agent ask a clarifying question, propose a plan, take a correction, or stop when the user is satisfied. A conversation task adds a simulated user: a second model that plays the person, holds information the agent does not have, answers its questions, and decides when the task is done.
+
+```toml
+id = "fix-slugify-ambiguous"
+prompt = "Something is broken in slugify, fix it."      # the user's opening message
+fixture = { dir = "fixtures/slugify" }
+
+[conversation]
+persona = "A busy maintainer who prefers small diffs and answers questions in one line."
+hidden = """
+The failing test is the uppercase case. You know this but only say it if asked which test fails.
+If asked whether to also fix the hyphen collapsing, say no.
+"""
+max_user_turns = 6             # replies the simulated user may send; default 6
+model = "claude-sonnet-5-5"    # optional; default is the experiment's judge model
+effort = "low"                 # optional
+done_when = "The agent reports the tests pass and asks for nothing more."
+sees_tools = true              # show the simulator which tools the agent used (default); false for a chat user
+```
+
+- The agent runs as one Claude Code session. When its turn ends, the simulator is shown the persona, the hidden text, the dialog so far and the names of the tools the agent just used, and returns its reply, whether the conversation is done, whether it is satisfied, and whether its reply gave away hidden information unasked.
+- The run ends when the simulator says it is done, when it has nothing to add, when `max_user_turns` is reached, or at the timeout. A run stopped at `max_user_turns` is graded as it stands and counted with timeouts.
+- Claude Code and the mock runner can hold a dialog. Codex cannot in this round, and an experiment that pairs it with a conversation task is refused at load. Conversations do not run under `isolation = "docker"`.
+- The transcript holds the opening prompt and every reply as `user` turns; replies carry `simulated: true`. `transcript_regex` (with `scope = "all"`) and `sequence` work over the dialog. The rubric judge, the pairwise judge and the Review page are shown the whole dialog as well as the result.
+- Metrics: `user_turns` (replies sent), `questions_asked` (agent messages ending in a question, plus `AskUserQuestion` calls), `user_satisfied` (0 or 1, from the simulator's last verdict), `hidden_revealed` (replies the simulator flagged as volunteering hidden information; a validity check, since such runs are easier than the task intends), and `simulator_cost_usd`.
+- The simulator's calls count toward `budget_usd`, and the report shows their cost beside the judge's. Its model, effort, persona and hidden text are stored in each run's `meta.json`.
+- Two runs of a cell differ by agent and by simulator. `runs_per_cell` applies as usual, and the report says its comparisons include simulator variance.
+
+The mock simulator (`model = "mock"`) sends each `mock-reply:` line of the hidden text in turn and is then done; a line starting with `!` is flagged as revealing hidden information.
+
 ## Judge calibration
 
 The pairwise judge checks itself for position bias, but only a person can say whether it picks what a person would. Every human vote in Review lands on a pair, and where the judge voted on the same pair the two are compared.
@@ -227,7 +259,7 @@ The report gains a trigger section per variant: `trigger_precision`, `trigger_re
 
 ## Metrics
 
-Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `check.<grader>` (each deterministic grader's own pass rate), `skill_invoked`, `trigger_fired`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `mcp.<server>.<tool>`, `tool_calls_before_final`, `distinct_tools`, `hook.<Event>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
+Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `user_turns`, `questions_asked`, `user_satisfied`, `hidden_revealed`, `simulator_cost_usd` (conversation tasks), `check.<grader>` (each deterministic grader's own pass rate), `skill_invoked`, `trigger_fired`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `mcp.<server>.<tool>`, `tool_calls_before_final`, `distinct_tools`, `hook.<Event>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
 
 ## Suite
 

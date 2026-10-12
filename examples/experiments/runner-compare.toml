@@ -21,4 +21,4 @@ kind = "overlay"
 levels = ["overlays/none", "overlays/terse"]
 
 [tasks]
-include = ["tasks/coding/*.toml"]
+include = ["tasks/coding/fix-slugify.toml"]

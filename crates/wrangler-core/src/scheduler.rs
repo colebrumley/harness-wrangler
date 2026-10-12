@@ -208,7 +208,7 @@ pub fn execute(project: &Project, store: &Store, launch_id: i64, opts: &RunOptio
 
 /// Agent plus judge cost recorded for a launch so far.
 pub fn launch_cost(store: &Store, launch_id: i64) -> Result<f64> {
-    let runs: f64 = store.metrics_for_launch(launch_id)?.values().map(|m| m.get("cost_usd").copied().unwrap_or(0.0) + m.get("judge_cost_usd").copied().unwrap_or(0.0)).sum();
+    let runs: f64 = store.metrics_for_launch(launch_id)?.values().map(|m| ["cost_usd", "judge_cost_usd", "simulator_cost_usd"].iter().map(|k| m.get(*k).copied().unwrap_or(0.0)).sum::<f64>()).sum();
     let pairs: f64 = store.judgments(launch_id, Some("judge"))?.iter().filter_map(|j| j.detail["cost_usd"].as_f64()).sum();
     Ok(runs + pairs)
 }
@@ -261,8 +261,10 @@ fn execute_run(
             timeout: Duration::from_secs(task.timeout_secs.unwrap_or(exp.timeout_secs)),
             cancel: cancel.clone(),
             isolation: exp.isolation,
-            network: exp.network,
+            network: exp.network.clone(),
             cfg: exp.runner.clone(),
+            // The simulated user is the task's own model, else the judge's.
+            simulator: task.conversation.as_ref().and_then(|c| c.model.clone().or_else(|| exp.judge().map(|j| j.model)).map(|m| (m, c.effort.clone().or_else(|| exp.judge().and_then(|j| j.effort))))),
         };
         let started = Instant::now();
         let mut events: Vec<RunEvent> = vec![];
@@ -337,7 +339,7 @@ fn execute_run(
         std::fs::write(run_dir.join("final.txt"), &rec.final_text)?;
         std::fs::write(
             run_dir.join("meta.json"),
-            serde_json::to_string_pretty(&json!({"command": rec.command, "diff": diff, "output_file": task.output_file, "output_is_file": file_output.is_some()}))?,
+            serde_json::to_string_pretty(&json!({"command": rec.command, "diff": diff, "output_file": task.output_file, "output_is_file": file_output.is_some(), "conversation": rec.conversation}))?,
         )?;
         // Keep the files the agent touched so reviewers can open them later.
         for f in diff.files.iter().take(200) {
@@ -391,7 +393,10 @@ fn execute_run(
         for g in &grades {
             store.put_grade(g)?;
         }
-        Ok((status.to_string(), rec.metrics.get("cost_usd").copied(), error))
+        // The simulated user's calls are part of what the run cost.
+        let sim = rec.metrics.get("simulator_cost_usd").copied().unwrap_or(0.0);
+        let cost = rec.metrics.get("cost_usd").copied().map(|c| c + sim).or((sim > 0.0).then_some(sim));
+        Ok((status.to_string(), cost, error))
     })();
     if exp.keep_workspaces {
         let _ = std::fs::write(run_dir.join("workspace-path.txt"), ws.dir.to_string_lossy().as_bytes());
@@ -428,7 +433,9 @@ pub fn shown_for(run: &RunRow, task: &Task) -> Shown {
         (Some(f), true) => diff_without(&patch, f),
         _ => patch,
     };
-    Shown { output: run.output_text.clone(), diff, output_is_file, ..Default::default() }
+    // A conversation is shown whole: judges and reviewers read what was asked and answered.
+    let dialog = if task.conversation.is_some() { load_transcript(run).dialog_text() } else { String::new() };
+    Shown { output: run.output_text.clone(), diff, output_is_file, dialog, ..Default::default() }
 }
 
 /// What the judge is shown: the same as a reviewer, plus the tool-call

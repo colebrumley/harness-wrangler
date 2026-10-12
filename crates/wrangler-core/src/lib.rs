@@ -16,6 +16,7 @@ pub mod report;
 pub mod review;
 pub mod runner;
 pub mod scheduler;
+pub mod simulator;
 pub mod stats;
 pub mod store;
 pub mod suite;

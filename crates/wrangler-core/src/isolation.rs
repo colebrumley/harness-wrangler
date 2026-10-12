@@ -23,6 +23,38 @@ pub const ANTHROPIC_HOSTS: &[&str] = &["anthropic.com", "claude.ai", "claude.com
 pub struct Sandbox {
     profile_path: PathBuf,
     proxy: Option<Proxy>,
+    /// Local servers are allowed: connections to this machine skip the proxy.
+    direct: bool,
+}
+
+/// Paths an MCP server's launcher writes outside the workspace, by the
+/// command that starts it. The profile does not restrict reads, so the
+/// server's binary, its runtime and any path the config names are readable
+/// already; what a launcher needs is its own cache. Measured the same way as
+/// the Claude Code paths (docs/isolation.md).
+pub fn mcp_writable_paths(configs: &[PathBuf]) -> Vec<SbPath> {
+    let h = home();
+    let mut out: Vec<SbPath> = vec![];
+    let mut add = |p: PathBuf| {
+        if !out.iter().any(|x| matches!(x, SbPath::Subpath(q) if *q == p)) {
+            out.push(SbPath::Subpath(p));
+        }
+    };
+    for cfg in configs {
+        for (_, server) in crate::runner::mcp_servers(cfg).unwrap_or_default() {
+            let command = server["command"].as_str().unwrap_or("");
+            match Path::new(command).file_name().and_then(|n| n.to_str()).unwrap_or("") {
+                // npx downloads packages into the npm cache and logs there.
+                "npx" | "npm" | "pnpm" | "bunx" => add(h.join(".npm")),
+                "uvx" | "uv" => {
+                    add(h.join(".cache/uv"));
+                    add(h.join(".local/share/uv"));
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 fn home() -> PathBuf {
@@ -65,7 +97,7 @@ fn sb_quote(p: &Path) -> String {
 }
 
 /// Build the seatbelt profile text.
-pub fn profile(workspace: &Path, extra: &[SbPath], network: NetworkPolicy, proxy_port: Option<u16>) -> String {
+pub fn profile(workspace: &Path, extra: &[SbPath], network: &NetworkPolicy, proxy_port: Option<u16>) -> String {
     let mut s = String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n");
     s.push_str(&format!("  (subpath \"{}\")\n", sb_quote(&canon(workspace))));
     for p in extra {
@@ -76,9 +108,13 @@ pub fn profile(workspace: &Path, extra: &[SbPath], network: NetworkPolicy, proxy
     }
     // Device nodes and the per-process temp dirs every Unix tool assumes.
     s.push_str("  (literal \"/dev/null\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\")\n  (regex #\"^/dev/ttys[0-9]+$\") (regex #\"^/dev/fd/\")\n)\n");
-    if network == NetworkPolicy::Anthropic {
+    if network.restricted() {
         s.push_str("(deny network-outbound)\n");
         if let Some(port) = proxy_port {
+            s.push_str(&format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n"));
+        }
+        // Servers on this machine named in `network = { allow = [...] }` are reached directly.
+        for port in network.local_ports() {
             s.push_str(&format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n"));
         }
         // Local IPC (keychain, system services) is unix-socket and mach traffic, not internet.
@@ -89,18 +125,17 @@ pub fn profile(workspace: &Path, extra: &[SbPath], network: NetworkPolicy, proxy
 
 impl Sandbox {
     /// The sandbox for a Claude Code run, or `None` below the seatbelt level.
-    pub fn for_claude(ws: &Workspace, limits: &Limits) -> Result<Option<Sandbox>> {
+    pub fn for_claude(ws: &Workspace, limits: &Limits, extra_writable: &[SbPath]) -> Result<Option<Sandbox>> {
         if limits.isolation != Isolation::Seatbelt {
             return Ok(None);
         }
-        let proxy = match limits.network {
-            NetworkPolicy::Anthropic => Some(Proxy::start(ANTHROPIC_HOSTS.iter().map(|s| s.to_string()).collect())?),
-            NetworkPolicy::Full => None,
-        };
-        let text = profile(&ws.dir, &claude_writable_paths(), limits.network, proxy.as_ref().map(|p| p.port));
+        let proxy = if limits.network.restricted() { Some(Proxy::start(limits.network.hosts())?) } else { None };
+        let mut writable = claude_writable_paths();
+        writable.extend(extra_writable.iter().cloned());
+        let text = profile(&ws.dir, &writable, &limits.network, proxy.as_ref().map(|p| p.port));
         let profile_path = ws.run_dir.join("sandbox.sb");
         std::fs::write(&profile_path, text)?;
-        Ok(Some(Sandbox { profile_path, proxy }))
+        Ok(Some(Sandbox { profile_path, proxy, direct: !limits.network.local_ports().is_empty() }))
     }
 
     /// Rewrite the command to run under `sandbox-exec`.
@@ -114,7 +149,9 @@ impl Sandbox {
             for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
                 spec.env.push((k.into(), url.clone()));
             }
-            spec.env.push(("NO_PROXY".into(), String::new()));
+            let no_proxy = if self.direct { "localhost,127.0.0.1" } else { "" };
+            spec.env.push(("NO_PROXY".into(), no_proxy.into()));
+            spec.env.push(("no_proxy".into(), no_proxy.into()));
         }
     }
 
@@ -377,7 +414,7 @@ mod tests {
 
     #[test]
     fn profile_confines_writes() {
-        let text = profile(Path::new("/tmp"), &[SbPath::Prefix(PathBuf::from("/Users/x/.claude.json"))], NetworkPolicy::Anthropic, Some(4040));
+        let text = profile(Path::new("/tmp"), &[SbPath::Prefix(PathBuf::from("/Users/x/.claude.json"))], &NetworkPolicy::Anthropic, Some(4040));
         assert!(text.contains("(deny file-write*)"));
         assert!(text.contains("localhost:4040"));
         assert!(text.contains(r#"(regex #"^/Users/x/\.claude\.json")"#));
@@ -391,7 +428,7 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let outside = canon(tmp.path()).join("outside.txt");
         let prof = canon(tmp.path()).join("p.sb");
-        std::fs::write(&prof, profile(&ws, &[], NetworkPolicy::Full, None)).unwrap();
+        std::fs::write(&prof, profile(&ws, &[], &NetworkPolicy::Full, None)).unwrap();
         let run = |script: &str| {
             std::process::Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&prof).args(["/bin/sh", "-c", script]).current_dir(&ws).status().unwrap().success()
         };

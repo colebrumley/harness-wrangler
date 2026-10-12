@@ -124,7 +124,9 @@ fn section<'a>(prompt: &'a str, tag: &str) -> &'a str {
 
 impl JudgeBackend for MockJudge {
     fn complete(&self, prompt: &str, schema: &Value, _cfg: &JudgeCfg, _cancel: &Arc<AtomicBool>) -> Result<JudgeReply> {
-        let value = if schema["properties"].get("should").is_some() {
+        let value = if schema["properties"].get("revealed_hidden").is_some() {
+            crate::simulator::mock_reply(prompt)
+        } else if schema["properties"].get("should").is_some() {
             // Trigger corpus drafts: should-fire prompts reuse the description's own words, near misses avoid them.
             let words: Vec<String> = section(prompt, "description").split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 6).map(|w| w.to_lowercase()).collect();
             let n = prompt.split("lists of ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4);
@@ -200,6 +202,8 @@ pub struct Shown {
     pub output_is_file: bool,
     /// Compact tool-call trace, shown only with `judge = { transcript = "tools" }`.
     pub trace: String,
+    /// Conversation tasks: the whole dialog between the simulated user and the agent.
+    pub dialog: String,
 }
 
 fn task_block(task: &Task, rubric: Option<&str>) -> String {
@@ -223,7 +227,12 @@ fn reference_block(task: &Task) -> String {
 }
 
 fn shown_block(tag: &str, shown: &Shown) -> String {
-    let mut s = format!("<{tag}>\n{}\n</{tag}>\n", truncate_middle(shown.output.trim(), MAX_OUTPUT_CHARS));
+    let mut s = String::new();
+    // A conversation is judged as a whole: what was asked, what was answered, then the result.
+    if !shown.dialog.trim().is_empty() {
+        s.push_str(&format!("<{tag}_dialog>\n{}\n</{tag}_dialog>\n", truncate_middle(shown.dialog.trim(), MAX_OUTPUT_CHARS)));
+    }
+    s.push_str(&format!("<{tag}>\n{}\n</{tag}>\n", truncate_middle(shown.output.trim(), MAX_OUTPUT_CHARS)));
     // When the output is itself a workspace file its content is already
     // above; the diff adds only the other files the agent changed.
     if !shown.diff.trim().is_empty() {
@@ -401,5 +410,8 @@ mod tests {
         let p = rubric_prompt(&task(), None, &with);
         assert!(p.contains("<output_tool_calls>\n1. Bash: pytest -q\n</output_tool_calls>"));
         assert!(pairwise_prompt(&task(), None, &with, &shown(0.1)).contains("<output_a_tool_calls>"));
+        let talk = Shown { output: "o".into(), dialog: "[user] fix it\n[agent] Which test fails?\n[user (simulated)] The unicode one.".into(), ..Default::default() };
+        assert!(rubric_prompt(&task(), None, &talk).contains("<output_dialog>\n[user] fix it"));
+        assert!(pairwise_prompt(&task(), None, &shown(0.1), &talk).contains("<output_b_dialog>"));
     }
 }

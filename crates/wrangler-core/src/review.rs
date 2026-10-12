@@ -21,6 +21,27 @@ pub struct Side {
     pub diff: String,
     pub output_is_file: bool,
     pub annotations: Vec<Annotation>,
+    /// Conversation tasks: the dialog, one entry per message, user turns marked.
+    #[serde(default)]
+    pub dialog: Vec<DialogLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DialogLine {
+    /// user | agent
+    pub role: String,
+    pub text: String,
+    pub simulated: bool,
+}
+
+/// The messages of a conversation run, without tool calls or results.
+pub fn dialog_lines(run: &RunRow) -> Vec<DialogLine> {
+    crate::scheduler::load_transcript(run)
+        .turns
+        .iter()
+        .filter(|t| !t.subagent && !t.text.trim().is_empty() && t.tool_results.is_empty())
+        .map(|t| DialogLine { role: if t.role == "user" { "user".into() } else { "agent".into() }, text: t.text.trim().to_string(), simulated: t.simulated })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,7 +308,7 @@ pub fn next_for(store: &Store, launch_id: i64, mode: Mode) -> Result<Option<Revi
     let side = |id: i64| -> Result<Side> {
         let run = runs.iter().find(|r| r.id == id).unwrap();
         let shown = shown_for(run, task);
-        Ok(Side { run_id: id, output: shown.output, diff: shown.diff, output_is_file: shown.output_is_file, annotations: store.annotations_for_run(id)? })
+        Ok(Side { run_id: id, output: shown.output, diff: shown.diff, output_is_file: shown.output_is_file, annotations: store.annotations_for_run(id)?, dialog: if task.conversation.is_some() { dialog_lines(run) } else { vec![] } })
     };
     // Which run goes left is a coin flip fixed per pair, independent of variant order.
     let flip = hash_u64(&format!("side|{}|{}", cand.a, cand.b)) % 2 == 1;

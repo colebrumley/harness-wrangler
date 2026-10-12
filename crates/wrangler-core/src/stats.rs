@@ -53,6 +53,11 @@ pub fn metric_info(name: &str) -> MetricInfo {
         "cache_hit" => ("Cache hit", Higher, Rate, ""),
         "cost_usd" => ("Cost", Lower, Positive, "$"),
         "judge_cost_usd" => ("Judge cost", Lower, Positive, "$"),
+        "simulator_cost_usd" => ("Simulated user cost", Lower, Positive, "$"),
+        "user_turns" => ("User turns", None, Positive, ""),
+        "questions_asked" => ("Questions asked", None, Positive, ""),
+        "user_satisfied" => ("User satisfied", Higher, Rate, ""),
+        "hidden_revealed" => ("Hidden info volunteered", Lower, Positive, ""),
         "wall_time_s" => ("Wall time", Lower, Positive, "s"),
         "total_tokens" => ("Total tokens", Lower, Positive, "tok"),
         "input_tokens" => ("Input tokens", Lower, Positive, "tok"),
@@ -82,7 +87,7 @@ pub fn metric_info(name: &str) -> MetricInfo {
 }
 
 /// Metrics shown by default in reports, in display order.
-pub const HEADLINE: &[&str] = &["pass", "judge_score", "expectations_passed", "checks_passed", "skill_invoked", "trigger_fired", "cost_usd", "wall_time_s", "total_tokens", "output_tokens", "turns", "tool_calls", "output_words", "diff_lines"];
+pub const HEADLINE: &[&str] = &["pass", "judge_score", "expectations_passed", "checks_passed", "skill_invoked", "trigger_fired", "user_satisfied", "questions_asked", "user_turns", "hidden_revealed", "cost_usd", "wall_time_s", "total_tokens", "output_tokens", "turns", "tool_calls", "output_words", "diff_lines"];
 
 pub fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {

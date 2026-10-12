@@ -1,0 +1,29 @@
+id = "fix-slugify-ambiguous"
+prompt = "Something is broken in slugify, fix it."
+fixture = { dir = "fixtures/slugify" }
+expected_output = "slugify.py fixed so the tests pass, with a small diff; the agent found out which behaviour was wrong before changing code, either by asking or by running the tests."
+expectations = [
+  "The agent established what was broken before editing: it asked, or it ran the tests and read the failures",
+  "The final message says what was wrong and that the tests pass",
+  "The agent did not also change the hyphen collapsing",
+]
+tags = ["coding", "bugfix", "conversation"]
+
+# A simulated user plays the person. The prompt above is their opening
+# message; the agent's questions are answered from the hidden text.
+[conversation]
+persona = "A busy maintainer who prefers small diffs and answers questions in one line."
+hidden = """
+The failing tests are the uppercase one (the slug must be lowercased) and the max_length one (a cut must not leave a trailing hyphen). You know this but only say it if asked which test fails or what is broken.
+If asked whether to also fix or change the hyphen collapsing, say no.
+The tests are in tests/ and run with: python3 -m unittest discover -s tests -q
+"""
+max_user_turns = 6
+done_when = "The agent reports the tests pass and asks for nothing more."
+
+[graders]
+deterministic = [
+  { kind = "command", cmd = "python3 -m unittest discover -s tests -q", name = "tests-pass" },
+  { kind = "command", cmd = "git diff --quiet wrangler-baseline -- tests", name = "tests-untouched" },
+  { kind = "diff_size", max = 20 },
+]

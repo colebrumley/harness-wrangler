@@ -30,7 +30,7 @@ fn live(var: &str) -> bool {
 }
 
 fn limits(isolation: Isolation, network: NetworkPolicy) -> Limits {
-    Limits { timeout: Duration::from_secs(300), cancel: Arc::new(AtomicBool::new(false)), isolation, network, cfg: RunnerCfg::default() }
+    Limits { timeout: Duration::from_secs(300), cancel: Arc::new(AtomicBool::new(false)), isolation, network, cfg: RunnerCfg::default(), simulator: None }
 }
 
 fn variant(runner: &str, overlay: Option<&str>, model: Option<&str>) -> Variant {
@@ -238,6 +238,93 @@ fn claude_seatbelt_confines_writes_live() {
     let details: Vec<&str> = rec.events.iter().map(|e| e.detail.as_str()).collect();
     assert!(details.iter().any(|d| d.contains("connections allowed") && !d.contains(": 0 ")), "no traffic went through the proxy: {details:?}");
     assert!(details.iter().any(|d| d.contains("network blocked: example.com")), "example.com was not blocked: {details:?}\n{}", rec.final_text);
+    ws.remove();
+}
+
+/// The ambiguous slugify task from the example project, as a dialog with a
+/// simulated user, under seatbelt (the stdin mode needs no new profile paths).
+fn ambiguous_task(max_user_turns: u32, hidden: &str) -> Task {
+    Task::parse(&format!(
+        "id = 'ambiguous'\nprompt = 'Something is broken in slugify, fix it.'\nfixture = {{ dir = 'fixtures/slugify' }}\n[conversation]\npersona = 'A busy maintainer who prefers small diffs and answers questions in one line.'\nhidden = \"\"\"\n{hidden}\"\"\"\nmax_user_turns = {max_user_turns}\ndone_when = 'The agent reports the tests pass and asks for nothing more.'\n"
+    ))
+    .unwrap()
+}
+
+fn slugify_project(root: &std::path::Path) -> Project {
+    let project = Project::init(root).unwrap();
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for dir in ["fixtures/slugify", "overlays/ask-first"] {
+        let dst = root.join(dir);
+        std::fs::create_dir_all(&dst).unwrap();
+        wrangler_core::workspace::copy_dir_contents(&examples.join(dir), &dst).unwrap();
+    }
+    project
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_dialog_with_simulated_user_live() {
+    if !live("WRANGLER_LIVE") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let project = slugify_project(tmp.path());
+    let t = ambiguous_task(6, "The failing tests are the uppercase one (the slug must be lowercased) and the max_length one (a cut must not leave a trailing hyphen). Say so only if asked which test fails or what is broken.\nIf asked whether to also change the hyphen collapsing, say no.\n");
+    // An overlay that leaves no room to skip the question. (The example
+    // project's softer "when the task is underspecified" wording is what the
+    // ask-first experiment measures; Haiku often decides the tests say enough.)
+    common::write(tmp.path(), "overlays/must-ask/CLAUDE.md", "Before you run any command or change any file, ask the user exactly one clarifying question, then stop and wait for the answer.\n");
+    let v = variant("claude-code", Some("overlays/must-ask"), Some("claude-haiku-5-5"));
+    let ws = Workspace::create(&project, &t, &tmp.path().join("run"), "live").unwrap();
+    let r = runner::get("claude-code").unwrap();
+    r.materialize(&ws, &v).unwrap();
+    ws.commit_baseline().unwrap();
+    let mut lim = limits(Isolation::Seatbelt, NetworkPolicy::Anthropic);
+    lim.simulator = Some(("claude-haiku-5-5".into(), Some("low".into())));
+    let rec = r.run(&ws, &t, &v, &lim).unwrap();
+    assert!(rec.error.is_none(), "{:?}\n{}", rec.error, rec.stderr);
+    eprintln!("{}", rec.transcript.dialog_text());
+    // The simulator ended the dialog itself, the tests pass, and the overlay made the agent ask.
+    assert_eq!(rec.conversation["stop"], "done", "{}", rec.conversation);
+    assert!(rec.limit_hit.is_none() && !rec.timed_out);
+    let tests = std::process::Command::new("python3").args(["-m", "unittest", "discover", "-s", "tests", "-q"]).current_dir(&ws.dir).output().unwrap();
+    assert!(tests.status.success(), "the tests do not pass after the dialog: {}", String::from_utf8_lossy(&tests.stderr));
+    assert!(rec.metrics["questions_asked"] >= 1.0, "the agent was told to ask one question and asked none: {:?}", rec.metrics);
+    assert!(rec.metrics["user_turns"] >= 1.0 && rec.transcript.user_turns() as f64 == rec.metrics["user_turns"]);
+    assert!(rec.transcript.turns[0].role == "user" && !rec.transcript.turns[0].simulated);
+    assert!(rec.metrics["simulator_cost_usd"] > 0.0 && rec.metrics["cost_usd"] > 0.0);
+    assert!(rec.metrics.contains_key("user_satisfied") && rec.metrics.contains_key("hidden_revealed"));
+    // One session throughout: turns and tokens add up over the user's turns.
+    assert!(rec.metrics["turns"] >= 2.0);
+    ws.remove();
+}
+
+/// A user who is never satisfied: the run stops at the reply budget and is
+/// left to be graded as it stands.
+#[test]
+fn claude_dialog_stops_at_max_user_turns_live() {
+    if !live("WRANGLER_LIVE") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let project = slugify_project(tmp.path());
+    let mut t = ambiguous_task(2, "You are never satisfied. Whatever the agent reports, ask for one more small change (a comment, a rename, a docstring), a different one each time. Never say the task is done.\n");
+    t.conversation.as_mut().unwrap().done_when = "Never: there is always one more thing to ask for.".into();
+    let v = variant("claude-code", None, Some("claude-haiku-5-5"));
+    let ws = Workspace::create(&project, &t, &tmp.path().join("run"), "live").unwrap();
+    let r = runner::get("claude-code").unwrap();
+    r.materialize(&ws, &v).unwrap();
+    ws.commit_baseline().unwrap();
+    let mut lim = limits(Isolation::Workspace, NetworkPolicy::Full);
+    lim.simulator = Some(("claude-haiku-5-5".into(), Some("low".into())));
+    let rec = r.run(&ws, &t, &v, &lim).unwrap();
+    assert!(rec.error.is_none(), "{:?}\n{}", rec.error, rec.stderr);
+    assert_eq!(rec.conversation["stop"], "max_user_turns", "{}", rec.conversation);
+    assert!(rec.limit_hit.as_deref().unwrap_or("").contains("max_user_turns (2)"));
+    assert_eq!(rec.metrics["user_turns"], 2.0);
+    // Graded as it stands: the workspace has the agent's work in it.
+    let (_, stats) = ws.snapshot().unwrap();
+    assert!(stats.files.contains(&"slugify.py".to_string()), "{:?}", stats.files);
     ws.remove();
 }
 

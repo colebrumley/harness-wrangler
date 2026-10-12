@@ -50,7 +50,7 @@ export interface VariantSummary { key: string; label: string; levels: Record<str
 export interface Cell { variant_key: string; counts: Counts; metrics: Record<string, Summary>; flaky: string[]; run_ids: number[] }
 export interface Report {
   launch_id: number; experiment: string; description: string; status: string; phase: string; created_at: string; def_hash: string; runs_per_cell: number;
-  counts: Counts; cost_usd: number; judge_cost_usd: number; primary_metric: string; metrics: MetricInfo[];
+  counts: Counts; cost_usd: number; judge_cost_usd: number; simulator_cost_usd: number; primary_metric: string; metrics: MetricInfo[];
   factors: { name: string; kind: string; levels: string[] }[]; variants: VariantSummary[]; comparisons: Comparison[]; conditional: Conditional[];
   tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; trigger: TriggerReport | null; calibration: Calibration | null; events: any; warnings: string[];
 }

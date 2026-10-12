@@ -394,8 +394,8 @@ impl Project {
                 bail!("isolation = \"docker\" needs a running Docker daemon (`docker info` failed or did not answer within 8 seconds)");
             }
             warnings.push("docker isolation: a subscription login lives in the macOS keychain and does not exist in a container. The runner must authenticate from an environment variable passed with [runner] docker_env (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN and OPENAI_API_KEY pass by default when set).".into());
-            if exp.network == NetworkPolicy::Anthropic {
-                warnings.push("docker isolation does not apply network = \"anthropic\"; restrict the network with [runner] docker_args instead".into());
+            if exp.network.restricted() {
+                warnings.push("docker isolation does not apply the `network` setting; restrict the network with [runner] docker_args instead".into());
             }
         }
         if let Some(trigger) = &exp.trigger {
@@ -417,6 +417,25 @@ impl Project {
             warnings.push("some tasks carry `trigger` but the experiment has no [trigger] skill; the field is ignored".into());
         }
         let variants = exp.variants();
+        // Conversation tasks need a runner that can hold a dialog and a model to play the user.
+        let talks: Vec<&Task> = tasks.iter().filter(|t| t.conversation.is_some()).collect();
+        if let Some(t) = talks.first() {
+            let mut runners: Vec<&str> = variants.iter().map(|v| v.runner.as_str()).collect();
+            runners.sort();
+            runners.dedup();
+            for rid in runners {
+                if let crate::runner::Support::Unsupported(why) = crate::runner::get(rid)?.capabilities().conversation {
+                    bail!("task `{}` is a conversation, which runner `{rid}` cannot run: {why}", t.id);
+                }
+            }
+            if exp.isolation == Isolation::Docker {
+                bail!("task `{}` is a conversation; conversations are not supported under isolation = \"docker\"", t.id);
+            }
+            if let Some(t) = talks.iter().find(|t| t.conversation.as_ref().map(|c| c.model.is_none()).unwrap_or(false) && exp.judge().is_none()) {
+                bail!("task `{}`: the simulated user needs a model. Set `model` in its [conversation], or give the experiment a judge (its model is the default)", t.id);
+            }
+            warnings.push(format!("{} task(s) are conversations with a simulated user: each run differs by agent and by simulator, so comparisons include simulator variance", talks.len()));
+        }
         if variants.iter().any(|v| v.runner == "codex") && (exp.runner.max_turns.is_some() || tasks.iter().any(|t| t.max_turns.is_some())) {
             warnings.push("runner `codex` has no turn cap; max_turns is ignored for its runs".into());
         }

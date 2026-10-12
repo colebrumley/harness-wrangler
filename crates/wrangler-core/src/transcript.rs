@@ -127,6 +127,22 @@ impl Transcript {
         s
     }
 
+    /// The dialog of a conversation run as text: what each side said, in
+    /// order, without tool calls or results. The agent's side is the
+    /// messages it wrote outside subagents.
+    pub fn dialog_text(&self) -> String {
+        let mut s = String::new();
+        for t in self.turns.iter().filter(|t| !t.subagent && !t.text.trim().is_empty() && t.tool_results.is_empty()) {
+            let who = match (t.role.as_str(), t.simulated) {
+                ("user", true) => "user (simulated)",
+                ("user", false) => "user",
+                _ => "agent",
+            };
+            s.push_str(&format!("[{who}] {}\n\n", t.text.trim()));
+        }
+        s
+    }
+
     /// Simulated-user turns in a conversation run.
     pub fn user_turns(&self) -> usize {
         self.turns.iter().filter(|t| t.role == "user" && t.simulated).count()

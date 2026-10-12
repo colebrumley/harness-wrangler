@@ -33,6 +33,15 @@ impl ClaudeCodeRunner {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        // `--strict-mcp-config` stays, so exactly these servers load: a
+        // `.mcp.json` in the workspace is ignored under it, and without it
+        // the user's claude.ai connectors come along.
+        let mcp = mcp_config_paths(ws, variant);
+        if !mcp.is_empty() {
+            a.push("--mcp-config".into());
+            a.extend(mcp.iter().map(|p| p.to_string_lossy().to_string()));
+            // The list is variadic; the next flag ends it.
+        }
         if let Some(m) = &variant.model {
             a.extend(["--model".into(), m.clone()]);
         }
@@ -64,10 +73,38 @@ impl ClaudeCodeRunner {
                 }
             }
         }
-        a.push("--".into());
-        a.push(task.prompt.clone());
+        if task.conversation.is_some() {
+            // A dialog: user turns arrive on stdin as stream-json messages, one session throughout.
+            a.extend(["--input-format".into(), "stream-json".into()]);
+        } else {
+            a.push("--".into());
+            a.push(task.prompt.clone());
+        }
         Ok(a)
     }
+}
+
+/// A user turn as a stream-json input line.
+fn user_message(text: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+}
+
+/// What the agent said and which tools it used in its latest turn: the
+/// events after the previous `result` up to the last one.
+fn last_agent_turn(stream: &str) -> (String, Vec<String>) {
+    let lines: Vec<&str> = stream.lines().collect();
+    let is_result = |l: &&str| serde_json::from_str::<Value>(l).map(|v| v["type"] == "result").unwrap_or(false);
+    let ends: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_result(l)).map(|(i, _)| i).collect();
+    let Some(&end) = ends.last() else { return (String::new(), vec![]) };
+    let start = if ends.len() > 1 { ends[ends.len() - 2] + 1 } else { 0 };
+    let turn = parse_stream(&lines[start..=end].join("\n"));
+    let mut tools: Vec<String> = vec![];
+    for c in turn.transcript.tool_calls() {
+        if !tools.contains(&c.name) {
+            tools.push(c.name.clone());
+        }
+    }
+    (turn.final_text, tools)
 }
 
 impl AgentRunner for ClaudeCodeRunner {
@@ -82,8 +119,10 @@ impl AgentRunner for ClaudeCodeRunner {
             effort: Support::Full,
             system_prompt_append: Support::Full,
             knob: Support::Full,
+            mcp: Support::Full,
             seatbelt: Support::Full,
             hooks: Support::Full,
+            conversation: Support::Full,
             reports_cost: true,
         }
     }
@@ -114,13 +153,34 @@ impl AgentRunner for ClaudeCodeRunner {
         };
         let mut command = vec![spec.program.clone()];
         command.extend(spec.args.iter().cloned());
-        let sandbox = Sandbox::for_claude(ws, limits)?;
+        let sandbox = Sandbox::for_claude(ws, limits, &crate::isolation::mcp_writable_paths(&mcp_config_paths(ws, variant)))?;
         if let Some(sb) = &sandbox {
             sb.apply(&mut spec);
         }
         let docker = crate::isolation::DockerRun::wrap(ws, limits, &mut spec, &[])?;
-        let out = exec(&spec)?;
-        let mut rec = parse_stream(&out.stdout);
+        let mut dialog = match (&task.conversation, &limits.simulator) {
+            (Some(conv), Some((model, effort))) => Some(crate::simulator::Dialog::new(task, conv, model, effort.clone(), &limits.cancel)),
+            (Some(_), None) => bail!("task `{}` is a conversation but no simulator model is set (conversation.model, or a judge model)", task.id),
+            _ => None,
+        };
+        let (out, mut rec) = match dialog.as_mut() {
+            None => {
+                let out = exec(&spec)?;
+                let rec = parse_stream(&out.stdout);
+                (out, rec)
+            }
+            Some(d) => {
+                // Stdin stays open; each `result` event ends the agent's turn and the simulated user answers.
+                let out = exec_dialog(&spec, &user_message(&task.prompt), "result", &mut |so_far| {
+                    let (text, tools) = last_agent_turn(so_far);
+                    Ok(d.agent_turn_ended(&text, tools)?.map(|reply| user_message(&reply)))
+                })?;
+                let mut rec = parse_dialog(&out.stdout, &task.prompt, &d.replies);
+                d.finish(&mut rec);
+                rec.conversation = d.record();
+                (out, rec)
+            }
+        };
         if let Some(sb) = sandbox {
             rec.events.extend(sb.finish());
         }
@@ -165,8 +225,23 @@ fn block_text(content: &Value) -> String {
 /// Normalize Claude Code `stream-json` output: transcript, metrics from the
 /// final result event, rate-limit events, and the error state.
 pub fn parse_stream(raw: &str) -> RunRecord {
+    parse_with_replies(raw, None, &[])
+}
+
+/// The same for a conversation run. The stream does not echo what was
+/// written to stdin, so the opening prompt and each simulated reply are put
+/// back where they were sent: the prompt first, reply k after the k-th `result`.
+pub fn parse_dialog(raw: &str, opening: &str, replies: &[String]) -> RunRecord {
+    parse_with_replies(raw, Some(opening), replies)
+}
+
+fn parse_with_replies(raw: &str, opening: Option<&str>, replies: &[String]) -> RunRecord {
     let mut rec = RunRecord::default();
     let mut last_msg_id = String::new();
+    let mut results = 0usize;
+    if let Some(text) = opening {
+        rec.transcript.turns.push(Turn { role: "user".into(), text: text.to_string(), ..Default::default() });
+    }
     for line in raw.lines() {
         let Ok(ev) = serde_json::from_str::<Value>(line) else { continue };
         let ty = ev["type"].as_str().unwrap_or("");
@@ -317,6 +392,11 @@ pub fn parse_stream(raw: &str) -> RunRecord {
                     }
                     rec.error = Some(detail);
                 }
+                if let Some(reply) = replies.get(results) {
+                    last_msg_id.clear();
+                    rec.transcript.turns.push(Turn { role: "user".into(), text: reply.clone(), simulated: true, ..Default::default() });
+                }
+                results += 1;
             }
             _ => {}
         }
@@ -381,6 +461,70 @@ mod tests {
         // Cost is a running total across turns; turns and tokens add up.
         assert_eq!((rec.metrics["cost_usd"], rec.metrics["turns"], rec.metrics["output_tokens"], rec.metrics["duration_ms"]), (0.003, 3.0, 7.0, 150.0));
         assert_eq!(rec.final_text, "two");
+
+        // The same stream as a dialog: the opening prompt and the simulated reply are put back in order.
+        let d = parse_dialog(raw, "do one", &["now two".to_string()]);
+        let roles: Vec<(&str, bool, &str)> = d.transcript.turns.iter().map(|t| (t.role.as_str(), t.simulated, t.text.as_str())).collect();
+        assert_eq!(roles, vec![("user", false, "do one"), ("assistant", false, ""), ("user", true, "now two"), ("assistant", false, "two")]);
+        assert_eq!(d.transcript.user_turns(), 1);
+        assert_eq!(d.transcript.dialog_text(), "[user] do one\n\n[user (simulated)] now two\n\n[agent] two\n\n");
+        // What the simulator is told about the agent's latest turn.
+        let first_turn: String = raw.lines().take(4).collect::<Vec<_>>().join("\n");
+        assert_eq!(last_agent_turn(&first_turn), ("one".to_string(), vec!["mcp.filesystem.read_file".to_string()]));
+        assert_eq!(last_agent_turn(raw), ("two".to_string(), vec![]));
+        assert_eq!(serde_json::from_str::<Value>(&user_message("hi \"there\"")).unwrap()["message"]["content"], "hi \"there\"");
+    }
+
+    #[test]
+    fn mcp_levels_become_mcp_config_arguments() {
+        use crate::model::{Experiment, Isolation, NetworkPolicy, RunnerCfg, Task};
+        use crate::project::Project;
+        let tmp = tempfile::tempdir().unwrap();
+        let project = Project::init(tmp.path()).unwrap();
+        std::fs::create_dir_all(tmp.path().join("mcp")).unwrap();
+        std::fs::write(tmp.path().join("mcp/echo.json"), r#"{"mcpServers":{"echo":{"command":"python3","args":["echo.py"]}}}"#).unwrap();
+        std::fs::create_dir_all(tmp.path().join("overlays/with-mcp")).unwrap();
+        std::fs::write(tmp.path().join("overlays/with-mcp/.mcp.json"), r#"{"mcpServers":{"notes":{"command":"uvx","args":["notes-mcp"]}}}"#).unwrap();
+        let exp = Experiment::parse("name = 'x'\n[[factors]]\nname = 'tools'\nkind = 'mcp'\nlevels = ['', { value = 'mcp/echo.json', label = 'echo' }]\n[[factors]]\nname = 'overlay'\nkind = 'overlay'\nlevels = ['overlays/none', 'overlays/with-mcp']\n").unwrap();
+        project.validate(&{
+            let mut e = exp.clone();
+            std::fs::write(tmp.path().join("tasks/t.toml"), "id='t'\nprompt='p'\n").unwrap();
+            e.tasks.include = vec!["tasks/t.toml".into()];
+            e
+        })
+        .unwrap();
+        let task = Task::parse("id='t'\nprompt='do it'\n").unwrap();
+        let limits = Limits { timeout: Duration::from_secs(60), cancel: Arc::new(AtomicBool::new(false)), isolation: Isolation::Workspace, network: NetworkPolicy::Full, cfg: RunnerCfg::default(), simulator: None };
+        let runner = ClaudeCodeRunner::default();
+        let args_for = |i: usize| -> (Vec<String>, PathBuf) {
+            let v = &exp.variants()[i];
+            let ws = Workspace::create(&project, &task, &tmp.path().join(format!("run{i}")), "mcp").unwrap();
+            runner.materialize(&ws, v).unwrap();
+            let a = runner.build_args(&ws, &task, v, &limits).unwrap();
+            let dir = ws.dir.clone();
+            (a, dir)
+        };
+        let configs = |a: &[String]| -> Vec<String> {
+            match a.iter().position(|x| x == "--mcp-config") {
+                Some(i) => a[i + 1..].iter().take_while(|x| !x.starts_with("--")).cloned().collect(),
+                None => vec![],
+            }
+        };
+        // No level and no overlay config: no servers, and the strict flag stays.
+        let (none, _) = args_for(0);
+        assert!(configs(&none).is_empty() && none.contains(&"--strict-mcp-config".to_string()));
+        // The level's file, as an absolute path; `--strict-mcp-config` is kept so exactly it loads.
+        let (echo, _) = args_for(2);
+        let abs = project.abs("mcp/echo.json").to_string_lossy().to_string();
+        assert_eq!(configs(&echo), vec![abs.clone()]);
+        assert!(std::path::Path::new(&abs).is_absolute() && echo.contains(&"--strict-mcp-config".to_string()));
+        assert_eq!(echo.last().map(|s| s.as_str()), Some("do it"));
+        // An overlay's `.mcp.json` is not read by Claude Code under the strict flag, so it is passed too.
+        let (both, dir) = args_for(3);
+        assert_eq!(configs(&both), vec![abs, dir.join(".mcp.json").to_string_lossy().to_string()]);
+        // Launcher caches the sandbox must let the servers write.
+        let extra = crate::isolation::mcp_writable_paths(&[dir.join(".mcp.json"), project.abs("mcp/echo.json")]);
+        assert_eq!(extra.len(), 2, "uvx needs its two cache directories; python3 needs none: {extra:?}");
     }
 
     #[test]

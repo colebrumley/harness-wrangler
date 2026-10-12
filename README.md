@@ -116,6 +116,10 @@ wrangler suite diff writing-skills --model claude-opus-5-5
 
 The diff lists patterns that regressed first, then ones the new model made redundant, then ones still earning their keep.
 
+## Patterns about interaction
+
+`examples/experiments/ask-first.toml` compares no instructions against a one-line "ask one question before changing code when the task is underspecified" on a deliberately vague bugfix prompt. A simulated user (a second model with a persona and hidden information) answers the agent's questions and decides when the task is done, so the experiment can measure `questions_asked`, `user_satisfied` and what the question costs. See "Conversation tasks" in [docs/formats.md](docs/formats.md).
+
 ## Does a skill behave differently across models?
 
 Cross the skill with a model factor in one experiment:

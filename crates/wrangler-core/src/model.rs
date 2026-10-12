@@ -19,14 +19,90 @@ pub enum Isolation {
     Docker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+/// What a sandboxed run may reach. Written `"full"`, `"anthropic"`, or
+/// `{ allow = ["anthropic", "localhost:8080", "registry.npmjs.org"] }`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NetworkPolicy {
     /// No network restriction.
     #[default]
     Full,
     /// Outbound traffic only through an allowlisting proxy (Anthropic hosts).
     Anthropic,
+    /// The same proxy with a longer list. Entries: `anthropic` (the hosts
+    /// above), a hostname (suffix match), or `localhost:<port>` for a
+    /// server on this machine, which is reached directly.
+    Allow(Vec<String>),
+}
+
+impl NetworkPolicy {
+    pub fn restricted(&self) -> bool {
+        *self != NetworkPolicy::Full
+    }
+
+    /// Hostnames the proxy tunnels to (suffix match).
+    pub fn hosts(&self) -> Vec<String> {
+        let anthropic = || ["anthropic.com", "claude.ai", "claude.com"].iter().map(|s| s.to_string());
+        match self {
+            NetworkPolicy::Full => vec![],
+            NetworkPolicy::Anthropic => anthropic().collect(),
+            NetworkPolicy::Allow(list) => {
+                let mut out: Vec<String> = vec![];
+                for e in list {
+                    if e == "anthropic" {
+                        out.extend(anthropic());
+                    } else if Self::local_port(e).is_none() {
+                        out.push(e.trim().trim_start_matches("*.").to_lowercase());
+                    }
+                }
+                out
+            }
+        }
+    }
+
+    fn local_port(entry: &str) -> Option<u16> {
+        let (host, port) = entry.trim().rsplit_once(':')?;
+        matches!(host, "localhost" | "127.0.0.1").then(|| port.parse().ok()).flatten()
+    }
+
+    /// Ports on this machine the run may connect to directly.
+    pub fn local_ports(&self) -> Vec<u16> {
+        match self {
+            NetworkPolicy::Allow(list) => list.iter().filter_map(|e| Self::local_port(e)).collect(),
+            _ => vec![],
+        }
+    }
+}
+
+impl Serialize for NetworkPolicy {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            NetworkPolicy::Full => ser.serialize_str("full"),
+            NetworkPolicy::Anthropic => ser.serialize_str("anthropic"),
+            NetworkPolicy::Allow(list) => {
+                let mut m = ser.serialize_map(Some(1))?;
+                m.serialize_entry("allow", list)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Name(String),
+            Table { allow: Vec<String> },
+        }
+        match Raw::deserialize(de)? {
+            Raw::Name(n) if n == "full" => Ok(NetworkPolicy::Full),
+            Raw::Name(n) if n == "anthropic" => Ok(NetworkPolicy::Anthropic),
+            Raw::Name(n) => Err(serde::de::Error::custom(format!("unknown network policy `{n}` (use \"full\", \"anthropic\", or {{ allow = [...] }})"))),
+            Raw::Table { allow } => Ok(NetworkPolicy::Allow(allow)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +251,9 @@ pub enum FactorKind {
     SystemPromptAppend,
     /// Arbitrary runner knob: a CLI flag (`flag`) or environment variable (`env`).
     Knob,
+    /// MCP servers: each level is an MCP config file (`{"mcpServers": ...}`)
+    /// relative to the project; `""` means none.
+    Mcp,
 }
 
 impl FactorKind {
@@ -186,6 +265,7 @@ impl FactorKind {
             FactorKind::Runner => "runner",
             FactorKind::SystemPromptAppend => "system_prompt_append",
             FactorKind::Knob => "knob",
+            FactorKind::Mcp => "mcp",
         }
     }
 }
@@ -395,11 +475,47 @@ pub struct Task {
     /// `[trigger]` ought to fire on this prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
+    /// Multi-turn task: a simulated user answers the agent and decides when
+    /// the task is done. `prompt` is the opening message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Conversation>,
     #[serde(default, skip_serializing_if = "TaskGraders::is_empty")]
     pub graders: TaskGraders,
     /// Path of the task file relative to the project root (set at load).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+}
+
+fn default_user_turns() -> u32 {
+    6
+}
+
+/// The simulated user of a conversation task: a second model that plays
+/// the person. It holds a persona and information the agent does not have,
+/// answers the agent's questions, and decides when the task is done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    /// Who the user is and how they answer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub persona: String,
+    /// What the user knows and reveals only when asked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hidden: String,
+    /// Replies the simulated user may send before the run is stopped.
+    #[serde(default = "default_user_turns")]
+    pub max_user_turns: u32,
+    /// Simulator model. Default: the experiment's judge model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// When the user considers the task finished.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub done_when: String,
+    /// Show the simulator the names of the tools the agent called (someone
+    /// watching a terminal). `false` is a chat user who sees only messages.
+    #[serde(default = "default_true")]
+    pub sees_tools: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -690,6 +806,11 @@ impl Variant {
             .map(|(_, l)| l.value.as_str())
             .collect()
     }
+    /// MCP config files (project-relative), in factor order. Several `mcp`
+    /// factors stack: every non-empty level contributes its servers.
+    pub fn mcp_configs(&self) -> Vec<&str> {
+        self.levels.iter().filter(|(_, l)| l.kind == FactorKind::Mcp && !l.value.trim().is_empty() && l.value != "none").map(|(_, l)| l.value.as_str()).collect()
+    }
     pub fn knobs(&self) -> Vec<&LevelRef> {
         self.levels.iter().filter(|(_, l)| l.kind == FactorKind::Knob).map(|(_, l)| l).collect()
     }
@@ -834,6 +955,11 @@ impl Task {
         if t.prompt.trim().is_empty() && t.prompt_file.is_none() {
             bail!("task `{}` has neither `prompt` nor `prompt_file`", t.id);
         }
+        if let Some(c) = &t.conversation {
+            if c.max_user_turns == 0 {
+                bail!("task `{}`: conversation.max_user_turns must be at least 1", t.id);
+            }
+        }
         if let Some(tr) = &t.trigger {
             if tr != "should" && tr != "should_not" {
                 bail!("task `{}`: trigger must be \"should\" or \"should_not\", not \"{tr}\"", t.id);
@@ -934,6 +1060,34 @@ levels = [{ value = "claude-code", model = "claude-haiku-5-5" }, { value = "code
         assert_eq!(vs[1].runner, "codex");
         assert_eq!(vs[1].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(vs[1].effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn network_policy_forms() {
+        let parse = |v: &str| Experiment::parse(&format!("name = 'x'\nnetwork = {v}\n")).unwrap().network;
+        assert_eq!(parse("'full'"), NetworkPolicy::Full);
+        assert_eq!(parse("'anthropic'"), NetworkPolicy::Anthropic);
+        let allow = parse("{ allow = ['anthropic', 'localhost:8080', '127.0.0.1:9000', 'registry.npmjs.org'] }");
+        assert_eq!(allow.local_ports(), vec![8080, 9000]);
+        assert_eq!(allow.hosts(), vec!["anthropic.com", "claude.ai", "claude.com", "registry.npmjs.org"]);
+        assert!(allow.restricted() && !NetworkPolicy::Full.restricted());
+        assert!(Experiment::parse("name = 'x'\nnetwork = 'open'\n").is_err());
+        // Round-trips through TOML and through the JSON a launch is stored as.
+        let exp = Experiment::parse("name = 'x'\nnetwork = { allow = ['anthropic', 'localhost:8080'] }\n").unwrap();
+        assert_eq!(Experiment::parse(&exp.to_toml().unwrap()).unwrap().network, exp.network);
+        assert_eq!(serde_json::from_str::<Experiment>(&serde_json::to_string(&exp).unwrap()).unwrap().network, exp.network);
+    }
+
+    #[test]
+    fn mcp_levels_stack() {
+        let e = Experiment::parse(
+            "name = 'x'\n[[factors]]\nname = 'fs'\nkind = 'mcp'\nlevels = ['', { value = 'mcp/filesystem.json', label = 'fs' }]\n[[factors]]\nname = 'search'\nkind = 'mcp'\nlevels = ['mcp/search.json']\n",
+        )
+        .unwrap();
+        let vs = e.variants();
+        assert_eq!(vs[0].mcp_configs(), vec!["mcp/search.json"]);
+        assert_eq!(vs[1].mcp_configs(), vec!["mcp/filesystem.json", "mcp/search.json"]);
+        assert_eq!(vs[1].label, "fs · search.json");
     }
 
     #[test]
