@@ -6,6 +6,7 @@ pub mod advice;
 pub mod api;
 pub mod calibration;
 pub mod graders;
+pub mod harvest;
 pub mod interop;
 pub mod isolation;
 pub mod model;

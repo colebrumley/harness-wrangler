@@ -452,6 +452,8 @@ impl Api {
                 let rep = report::build(s, id, metric.as_deref())?;
                 json!({"launch_id": id, "experiment": rep.experiment, "primary_metric": rep.primary_metric, "suggestions": advice::build(s, id, metric.as_deref())?})
             }
+            // Harvest a run into a draft task: same prompt and fixture, the run's output as the judge's reference.
+            "import_run" => json!(crate::harvest::import_run(p, s, arg(args, "run_id")?, opt::<String>(args, "id")?.as_deref())?),
             "export_benchmark" => interop::export_benchmark(s, self.resolve(args)?, opt::<String>(args, "with")?.as_deref(), opt::<String>(args, "without")?.as_deref())?,
 
             other => bail!("unknown command `{other}`"),

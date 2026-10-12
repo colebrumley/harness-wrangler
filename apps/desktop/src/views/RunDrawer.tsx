@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fmtValue, info } from "../api";
+import { call, fmtValue, info } from "../api";
 import { ErrorNote, StatusChip, Tabs } from "../components";
 import { useLoad } from "../hooks";
 import { TextLines } from "./TextLines";
@@ -13,6 +13,12 @@ export default function RunDrawer({ runId, blind, onClose }: { runId: number; bl
   // A grade that names tool calls links to them: open the transcript at that call.
   const [focusCall, setFocusCall] = useState<string | null>(null);
   const showCall = (id: string) => { setFocusCall(id); setTab("transcript"); };
+  // Harvest: this run becomes a draft task whose reference output is what the run produced.
+  const [harvest, setHarvest] = useState<{ file?: string; error?: string } | null>(null);
+  const harvestRun = async () => {
+    try { const h = await call("import_run", { run_id: runId }); setHarvest({ file: h.task_file }); }
+    catch (e: any) { setHarvest({ error: String(e.message ?? e) }); }
+  };
   useEffect(() => {
     const on = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", on);
@@ -32,8 +38,13 @@ export default function RunDrawer({ runId, blind, onClose }: { runId: number; bl
               {d && <StatusChip status={d.run.status} />}
               {d && <span className="muted">{d.run.task_id}{blind ? "" : `, ${d.variant?.label ?? d.run.variant_key}, rep ${d.run.rep + 1}`}</span>}
             </div>
-            <button className="btn" onClick={onClose}>Close<kbd>Esc</kbd></button>
+            <div className="row">
+              {!blind && d?.run.status === "done" && <button className="btn" onClick={harvestRun} disabled={!!harvest?.file} title="Write a draft task with this run's prompt and fixture, and its output as the reference the judge sees">Harvest as a task</button>}
+              <button className="btn" onClick={onClose}>Close<kbd>Esc</kbd></button>
+            </div>
           </div>
+          {harvest?.file && <div className="note">Wrote <code>{harvest.file}</code>, tagged draft. Review it, then check it on the baseline: <code>wrangler task check {harvest.file}</code></div>}
+          {harvest?.error && <div className="note err">{harvest.error}</div>}
           <Tabs tabs={tabs} value={tab} onChange={setTab} />
         </header>
         <div className="scroll">

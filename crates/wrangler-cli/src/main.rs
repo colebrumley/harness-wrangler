@@ -12,7 +12,7 @@ use std::sync::Arc;
 use wrangler_core::ablation::{self, AblationRequest};
 use wrangler_core::project::Suite;
 use wrangler_core::scheduler::{self, Event, RunOptions};
-use wrangler_core::{advice, calibration, interop, report, review, runner, stats, suite, trigger, Project, Store};
+use wrangler_core::{advice, calibration, harvest, interop, report, review, runner, stats, suite, trigger, Project, Store};
 
 #[derive(Parser)]
 #[command(name = "wrangler", version, about = "Controlled experiments over coding-agent harness patterns")]
@@ -215,7 +215,12 @@ enum Cmd {
         #[arg(long, default_value = "")]
         reason: String,
     },
-    /// Import tasks from another format.
+    /// Work on one task: check it on the baseline before it joins an experiment.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Import tasks: from a Claude Code session, a wrangler run, or skill-creator evals.
     Import {
         #[command(subcommand)]
         cmd: ImportCmd,
@@ -273,7 +278,64 @@ enum SuiteCmd {
 }
 
 #[derive(Subcommand)]
+enum TaskCmd {
+    /// Run a task on the baseline (no overlay) a few times and print its pass
+    /// rate, judge score, variance and headroom.
+    Check {
+        /// Task id, or path to its file.
+        task: String,
+        #[arg(long, default_value_t = 3)]
+        reps: u32,
+        /// Borrow runner, model, isolation and graders from this experiment.
+        #[arg(long)]
+        experiment: Option<String>,
+        #[arg(long)]
+        runner: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Score each run with this judge model (needs expectations, expected_output or a rubric).
+        #[arg(long)]
+        judge_model: Option<String>,
+        #[arg(long)]
+        rubric: Option<String>,
+        #[arg(long)]
+        concurrency: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ImportCmd {
+    /// Draft a task from a Claude Code session: its prompt, a snapshot of the
+    /// repository as it was, and the test commands the session ran.
+    Session {
+        /// Path to a session .jsonl, or a session id under ~/.claude/projects.
+        session: String,
+        /// Which user message is the prompt (1 = the first).
+        #[arg(long)]
+        turn: Option<usize>,
+        /// Have a model draft expected_output and expectations from the rest of the session.
+        #[arg(long)]
+        draft_expectations: bool,
+        /// Model for --draft-expectations.
+        #[arg(long, default_value = "claude-sonnet-5-5")]
+        model: String,
+        /// Copy a file the secret list would skip (glob; repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Fixture size cap in MB (default 50).
+        #[arg(long)]
+        max_mb: Option<u64>,
+        /// Task and fixture id (default: <project>-<session id>).
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Draft a task from a wrangler run: same prompt and fixture, with the
+    /// run's output as the reference the judge sees.
+    Run {
+        run: i64,
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Import a skill-creator `evals/evals.json` as tasks and fixtures.
     SkillCreator {
         evals_json: PathBuf,
@@ -838,6 +900,62 @@ fn real_main(cli: Cli) -> Result<()> {
             }
             println!("vote: wrangler review {id} --vote left|right|tie|both_bad|skip --left {} --right {} [--reason \"...\"]", item.left.run_id, item.right.run_id);
         }
+        Cmd::Task { cmd: TaskCmd::Check { task, reps, experiment, runner, model, judge_model, rubric, concurrency } } => {
+            let task = harvest::find_task(&project, &task)?;
+            let exp = harvest::check_experiment(&project, &task, &harvest::CheckOptions { reps: Some(reps), experiment, runner, model, judge_model, rubric })?;
+            let (id, warnings) = scheduler::create_launch(&project, &store, &exp, None, &format!("task check: {}", task.id))?;
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
+            let cancel = cancel_on_sigint();
+            scheduler::execute(&project, &store, id, &RunOptions { concurrency, skip_judge: false, retry_failed: false, budget_usd: None, baseline_only: false }, cancel, &progress_sink(json))?;
+            let rep = report::build(&store, id, None)?;
+            if json {
+                return print_json(&json!({"launch_id": id, "task": task.id, "headroom": rep.tasks.first().map(|t| &t.headroom_by_metric), "metrics": rep.variants.first().map(|v| &v.metrics), "counts": rep.counts, "report": rep}));
+            }
+            let base = rep.variants.first();
+            println!("\ntask {} on the baseline ({} · {}), {} of {} run(s) finished", task.id, base.map(|v| v.runner.as_str()).unwrap_or(""), base.and_then(|v| v.model.as_deref()).unwrap_or("default model"), rep.counts.done, rep.counts.total);
+            let rooms = rep.tasks.first().map(|t| t.headroom_by_metric.clone()).unwrap_or_default();
+            for m in ["pass", "judge_score", "expectations_passed", "cost_usd", "wall_time_s", "diff_lines"] {
+                let Some(x) = base.and_then(|v| v.metrics.get(m)) else { continue };
+                let info = stats::metric_info(m);
+                let room = rooms.get(m).map(|h| format!("  headroom: {}", h.describe())).unwrap_or_default();
+                println!("  {:<18} {} ±{} (n={}){room}", info.label, report::fmt_value(&info, x.mean), report::fmt_value(&info, x.sd).trim_start_matches('$'), x.n);
+            }
+            if base.map(|v| !v.metrics.contains_key("pass") && !v.metrics.contains_key("judge_score")).unwrap_or(true) {
+                println!("  no pass rate or judge score: the task has no deterministic graders and no judge ran. Add graders, or pass --judge-model.");
+            }
+            let quality: Vec<(&String, &stats::Headroom)> = rooms.iter().filter(|(m, _)| ["pass", "judge_score"].contains(&m.as_str())).collect();
+            match quality.iter().find(|(_, h)| h.is_none()) {
+                Some((m, h)) => println!("\nverdict: no headroom on {} ({}). {} Make the task harder, or grade it on something that still varies.", stats::metric_info(m).label.to_lowercase(), h.at.as_deref().unwrap_or(""), if h.at.as_deref() == Some("floor") { "The baseline fails every time, so a pattern would have to do all the work." } else { "The baseline already succeeds every time, so no pattern can show a benefit here." }),
+                None if quality.is_empty() => {}
+                None if rep.counts.done < 3 => println!("\nverdict: too few finished runs to judge headroom (three are needed)."),
+                None => println!("\nverdict: the task leaves room for a difference. It can join an experiment."),
+            }
+            if rep.counts.failed + rep.counts.timeout > 0 {
+                println!("{} run(s) failed or timed out: wrangler runs {id} --status failed", rep.counts.failed + rep.counts.timeout);
+            }
+            if task.tags.iter().any(|t| t == "draft") {
+                println!("this task is still tagged `draft` ({}).", task.source);
+            }
+            println!("(launch #{id}; `wrangler delete {id}` removes it)");
+        }
+        Cmd::Import { cmd: ImportCmd::Session { session, turn, draft_expectations, model, include, max_mb, id } } => {
+            let file = harvest::Session::locate(&session)?;
+            let cancel = cancel_on_sigint();
+            let h = harvest::import_session(&project, &file, &harvest::SessionImport { turn, draft_expectations: draft_expectations.then_some(model), include, max_mb, id }, &cancel)?;
+            if json {
+                return print_json(&h);
+            }
+            print_harvest(&h);
+        }
+        Cmd::Import { cmd: ImportCmd::Run { run, id } } => {
+            let h = harvest::import_run(&project, &store, run, id.as_deref())?;
+            if json {
+                return print_json(&h);
+            }
+            print_harvest(&h);
+        }
         Cmd::Import { cmd: ImportCmd::SkillCreator { evals_json, skill_root } } => {
             let written = interop::import_skill_creator(&project, &evals_json, skill_root.as_deref())?;
             if json {
@@ -871,6 +989,43 @@ fn real_main(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_harvest(h: &harvest::Harvested) {
+    println!("wrote {} (task `{}`, tagged draft)", h.task_file, h.task_id);
+    println!("prompt: {}", wrangler_core::util::clip(&h.prompt, 160));
+    match &h.fixture {
+        Some(f) => {
+            let from = match (f.source.as_str(), &f.commit, f.commit_from.as_deref()) {
+                ("commit", Some(sha), Some("session")) => format!("commit {} (named in the session)", &sha[..sha.len().min(10)]),
+                ("commit", Some(sha), _) => format!("commit {} (the last before the session began)", &sha[..sha.len().min(10)]),
+                _ => "the directory as it is now".to_string(),
+            };
+            println!("fixture: {} from {from}: {} file(s), {:.1} MB", f.dir, f.files, f.bytes as f64 / 1_048_576.0);
+            for s in &f.secrets_skipped {
+                println!("  not copied (looks like a secret): {s}   (--include '{s}' to copy it)");
+            }
+            for w in &f.working_tree_files {
+                println!("  uncommitted at session start, copied as it is now: {w}");
+            }
+        }
+        None => println!("fixture: the original task's"),
+    }
+    for c in &h.test_commands {
+        println!("grader: command `{c}`");
+    }
+    if let Some(max) = h.diff_max {
+        println!("grader: diff_size max {max} (twice the session's own change)");
+    }
+    if h.drafted_expectations {
+        println!("expectations: drafted by a model (${:.4}); read them before trusting them", h.cost_usd);
+    } else if h.fixture.is_some() {
+        println!("expectations: none. Write them, or rerun with --draft-expectations.");
+    }
+    for w in &h.warnings {
+        println!("warning: {w}");
+    }
+    println!("next: review the task, then `wrangler task check {}`", h.task_id);
 }
 
 fn finish_run_output(store: &Store, id: i64, json: bool) -> Result<()> {

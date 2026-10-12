@@ -999,6 +999,22 @@ pub fn render_text(r: &Report) -> String {
     }
     s.push_str(&table(&rows));
 
+    // Each deterministic check on its own, so a process check ("tests-run-first")
+    // can be read apart from the outcome checks it is averaged with in `pass`.
+    let checks: Vec<&MetricInfo> = r.metrics.iter().filter(|m| m.name.starts_with("check.")).collect();
+    if !checks.is_empty() {
+        s.push_str("\nCHECKS (pass rate of each deterministic grader)\n");
+        let mut rows = vec![std::iter::once("check".to_string()).chain(r.variants.iter().map(|v| v.label.clone())).chain(std::iter::once("vs baseline".to_string())).collect::<Vec<_>>()];
+        for m in &checks {
+            let mut row = vec![m.name.trim_start_matches("check.").to_string()];
+            row.extend(r.variants.iter().map(|v| v.metrics.get(&m.name).map(|x| format!("{} (n={})", fmt_value(m, x.mean), x.n)).unwrap_or_else(|| "–".into())));
+            let effects: Vec<String> = r.comparisons.iter().filter(|c| c.kind == "factor" && c.metric == m.name).map(|c| format!("{}: {}", c.level, fmt_effect(m, &c.effect))).collect();
+            row.push(effects.join("; "));
+            rows.push(row);
+        }
+        s.push_str(&table(&rows));
+    }
+
     let key_metrics: Vec<String> = [r.primary_metric.as_str(), "pass", "cost_usd", "wall_time_s"].iter().filter(|m| r.metrics.iter().any(|x| x.name == **m)).map(|m| m.to_string()).collect::<BTreeSet<_>>().into_iter().collect();
     for f in &r.factors {
         let cs: Vec<&Comparison> = r.comparisons.iter().filter(|c| c.kind == "factor" && c.factor.as_deref() == Some(&f.name) && key_metrics.contains(&c.metric)).collect();

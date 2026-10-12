@@ -96,7 +96,8 @@ fixture = { dir = "fixtures/incident-report" }
 output_file = "SUMMARY.md"   # what judges and reviewers read; default is the final message
 expected_output = "A short, plain summary under 150 words leading with impact."
 expectations = ["Leads with user impact", "Under 150 words", "No hedging phrases"]
-tags = ["writing"]
+# reference_output = "..."   # a result someone accepted; the rubric judge sees it as a reference (set by `wrangler import run`)
+tags = ["writing"]           # `draft` marks a harvested or model-drafted task; `wrangler validate` lists those
 timeout_secs = 600           # overrides the experiment
 max_turns = 2                # overrides [runner] max_turns; reaching a task's own cap is a normal end, not a timeout
 trigger = "should"           # trigger experiments: "should" or "should_not" (see Trigger experiments)
@@ -108,6 +109,8 @@ deterministic = [
   { kind = "word_count", path = "SUMMARY.md", max = 150 },
 ]
 ```
+
+Tasks can be harvested instead of written: `wrangler import session` drafts one from a Claude Code session and `wrangler import run` from a wrangler run. See [harvesting.md](harvesting.md).
 
 ### Deterministic graders
 

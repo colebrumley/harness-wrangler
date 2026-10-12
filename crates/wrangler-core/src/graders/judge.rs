@@ -133,6 +133,8 @@ impl JudgeBackend for MockJudge {
                 "should": (0..n).map(|i| format!("Please help with {} for my team, draft {}.", word(i), i + 1)).collect::<Vec<_>>(),
                 "should_not": (0..n).map(|i| format!("What is the history of topic {} in general?", i + 1)).collect::<Vec<_>>(),
             })
+        } else if schema["properties"].get("expected_output").is_some() {
+            json!({"expected_output": "The task is done as the session did it (mock draft).", "expectations": ["The result does what the prompt asks", "The tests the session ran pass"]})
         } else if schema["properties"].get("winner").is_some() {
             let a = quality_in(section(prompt, "output_a")).unwrap_or(0.5);
             let b = quality_in(section(prompt, "output_b")).unwrap_or(0.5);
@@ -211,6 +213,15 @@ fn task_block(task: &Task, rubric: Option<&str>) -> String {
     s
 }
 
+/// A result that was accepted for this task before. Shown to the rubric
+/// judge only: in a blind A/B it would anchor both sides the same way.
+fn reference_block(task: &Task) -> String {
+    match task.reference_output.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => format!("\n<reference_output>\n{}\n</reference_output>\nThe reference is one result that was accepted for this task. Use it to calibrate what good looks like; a result need not resemble it to score well.\n", truncate_middle(r, MAX_DIFF_CHARS)),
+        None => String::new(),
+    }
+}
+
 fn shown_block(tag: &str, shown: &Shown) -> String {
     let mut s = format!("<{tag}>\n{}\n</{tag}>\n", truncate_middle(shown.output.trim(), MAX_OUTPUT_CHARS));
     // When the output is itself a workspace file its content is already
@@ -237,6 +248,7 @@ pub fn rubric_prompt(task: &Task, rubric: Option<&str>, shown: &Shown) -> String
         }
         s.push_str("</expectations>\n");
     }
+    s.push_str(&reference_block(task));
     s.push_str("\nThe agent's result:\n\n");
     s.push_str(&shown_block("output", shown));
     s.push_str(
@@ -379,6 +391,12 @@ mod tests {
         assert!(p.contains("RUBRIC-TEXT") && p.contains("<output_a>") && p.contains("<output_b_workspace_diff>") && p.contains("2. Under 150 words"));
         assert!(!p.to_lowercase().contains("skill"), "pairwise prompt must stay blind to configuration");
         assert!(!p.contains("_tool_calls>"), "no trace unless asked for");
+        // A harvested reference is shown to the rubric judge, and only to it.
+        let mut with_ref = task();
+        with_ref.reference_output = Some("REFERENCE-RESULT".into());
+        assert!(rubric_prompt(&with_ref, None, &shown(0.5)).contains("<reference_output>\nREFERENCE-RESULT\n</reference_output>"));
+        assert!(!pairwise_prompt(&with_ref, None, &shown(0.5), &shown(0.4)).contains("REFERENCE-RESULT"));
+        assert!(!rubric_prompt(&task(), None, &shown(0.5)).contains("reference_output"));
         let with = Shown { output: "o".into(), trace: "1. Bash: pytest -q\n".into(), ..Default::default() };
         let p = rubric_prompt(&task(), None, &with);
         assert!(p.contains("<output_tool_calls>\n1. Bash: pytest -q\n</output_tool_calls>"));

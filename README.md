@@ -12,7 +12,7 @@ Controlled experiments over coding-agent harness patterns. It measures whether s
 | `crates/wrangler-cli` | The `wrangler` CLI. Text for people, `--json` for agents and CI. |
 | `apps/desktop` | The desktop app: Tauri 2 shell plus a TypeScript frontend. |
 | `examples/` | A ready project: tasks, overlays (including a copy of `reader-first-writing` 1.1.0), experiments, and suites. |
-| `docs/` | [File formats](docs/formats.md), [isolation and what was measured](docs/isolation.md), [requirements for the next round](docs/requirements/README.md). |
+| `docs/` | [File formats](docs/formats.md), [isolation and what was measured](docs/isolation.md), [harvesting tasks](docs/harvesting.md), [requirements for the next round](docs/requirements/README.md). |
 
 ## Build
 
@@ -86,6 +86,9 @@ Run commands inside a project folder, or pass `-C <dir>`. Every command takes `-
 | `wrangler annotations <launch>` | Human review comments and reactions, grouped by variant. |
 | `wrangler review <launch> [--for calibration] [--vote left\|right\|tie\|both_bad\|skip --left <run> --right <run>]` | Blind pairwise review from the terminal: print the next pair, or record a vote. |
 | `wrangler calibration [--judge m] [--rubric r] [--tag t]` | How often the judge agrees with human votes, pooled over the project by judge model, rubric and task tag. |
+| `wrangler import session <session.jsonl\|id> [--turn N] [--draft-expectations]` | Draft a task from a Claude Code session: its prompt, the repository as it was, and the tests it ran. See [docs/harvesting.md](docs/harvesting.md). |
+| `wrangler import run <run>` | Draft a task from a run, with the run's output as the judge's reference. |
+| `wrangler task check <task> [--reps 3] [--experiment e]` | Run one task on the baseline and print its pass rate, spread and headroom, before it joins an experiment. |
 | `wrangler import skill-creator <evals.json>` / `wrangler export benchmark <launch>` | Interop with the skill-creator eval format. |
 | `wrangler serve [--port 4477]` | The JSON API and web UI on localhost. |
 

@@ -375,6 +375,10 @@ pub struct Task {
     pub expected_output: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expectations: Vec<String>,
+    /// A result someone accepted for this task (a harvested run's output).
+    /// The rubric judge is shown it as a reference point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_output: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Workspace file that is "the output" for judges and reviewers. Without
