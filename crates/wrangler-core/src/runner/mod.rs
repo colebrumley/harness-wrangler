@@ -32,6 +32,8 @@ pub struct Capabilities {
     pub system_prompt_append: Support,
     pub knob: Support,
     pub seatbelt: Support,
+    /// Whether hook executions are visible in the runner's output.
+    pub hooks: Support,
     /// Whether the runner reports dollar cost.
     pub reports_cost: bool,
 }
@@ -60,11 +62,15 @@ pub struct Limits {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunEvent {
-    /// rate_limit | retry | timeout | error | sandbox | note
+    /// rate_limit | retry | timeout | error | sandbox | hook | note
     pub kind: String,
     /// Milliseconds since the run started.
     pub at_ms: u64,
     pub detail: String,
+    /// Structured payload. Hook events carry `event`, `matcher`,
+    /// `exit_code`, `outcome` and `output`.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -246,11 +252,17 @@ pub fn looks_rate_limited(text: &str) -> bool {
 
 pub fn tally_tool_calls(transcript: &Transcript, metrics: &mut BTreeMap<String, f64>) {
     let mut total = 0.0;
+    let mut distinct = BTreeSet::new();
     for c in transcript.tool_calls() {
         total += 1.0;
-        *metrics.entry(format!("tool.{}", c.name)).or_insert(0.0) += 1.0;
+        distinct.insert(c.name.as_str());
+        // MCP tools are already `mcp.<server>.<tool>`; everything else is `tool.<Name>`.
+        let key = if c.name.starts_with("mcp.") { c.name.clone() } else { format!("tool.{}", c.name) };
+        *metrics.entry(key).or_insert(0.0) += 1.0;
     }
     metrics.insert("tool_calls".into(), total);
+    metrics.insert("tool_calls_before_final".into(), transcript.calls_before_final() as f64);
+    metrics.insert("distinct_tools".into(), distinct.len() as f64);
 }
 
 #[cfg(test)]

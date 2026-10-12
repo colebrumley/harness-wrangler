@@ -14,8 +14,8 @@
 use super::*;
 use crate::isolation::Sandbox;
 use crate::project::resolve_append;
-use crate::transcript::{ToolCall, ToolResult, Turn};
-use serde_json::Value;
+use crate::transcript::{normalize_tool_name, ToolCall, ToolResult, Turn};
+use serde_json::{json, Value};
 
 #[derive(Default)]
 pub struct ClaudeCodeRunner {
@@ -39,7 +39,8 @@ impl ClaudeCodeRunner {
         if let Some(e) = &variant.effort {
             a.extend(["--effort".into(), e.clone()]);
         }
-        a.extend(["--output-format".into(), "stream-json".into(), "--verbose".into()]);
+        // Hook lifecycle events are only in the stream when asked for.
+        a.extend(["--output-format".into(), "stream-json".into(), "--verbose".into(), "--include-hook-events".into()]);
         let appends: Vec<String> = variant.appends().iter().map(|v| resolve_append(&ws.project, v)).collect::<Result<_>>()?;
         if !appends.is_empty() {
             a.extend(["--append-system-prompt".into(), appends.join("\n\n")]);
@@ -82,6 +83,7 @@ impl AgentRunner for ClaudeCodeRunner {
             system_prompt_append: Support::Full,
             knob: Support::Full,
             seatbelt: Support::Full,
+            hooks: Support::Full,
             reports_cost: true,
         }
     }
@@ -171,8 +173,24 @@ pub fn parse_stream(raw: &str) -> RunRecord {
         let subagent = !ev["parent_tool_use_id"].is_null();
         match ty {
             "system" => {
-                if ev["subtype"] == "init" {
-                    rec.model = ev["model"].as_str().unwrap_or("").to_string();
+                match ev["subtype"].as_str().unwrap_or("") {
+                    "init" => rec.model = ev["model"].as_str().unwrap_or("").to_string(),
+                    // One per hook execution, with `--include-hook-events`.
+                    "hook_response" => {
+                        let event = ev["hook_event"].as_str().unwrap_or("?").to_string();
+                        // `hook_name` is "<Event>:<matcher>"; hooks without a matcher have only the event.
+                        let matcher = ev["hook_name"].as_str().and_then(|n| n.split_once(':')).map(|(_, m)| m.to_string()).unwrap_or_default();
+                        let output = crate::util::truncate_middle(ev["output"].as_str().or(ev["stdout"].as_str()).unwrap_or("").trim(), 2000);
+                        let exit = ev["exit_code"].as_i64();
+                        *rec.metrics.entry(format!("hook.{event}")).or_insert(0.0) += 1.0;
+                        rec.events.push(RunEvent {
+                            kind: "hook".into(),
+                            at_ms: 0,
+                            detail: format!("{event}{} exit {}", if matcher.is_empty() { String::new() } else { format!(" [{matcher}]") }, exit.map(|c| c.to_string()).unwrap_or_else(|| "?".into())),
+                            data: json!({"event": event, "matcher": matcher, "exit_code": exit, "outcome": ev["outcome"], "output": output, "stderr": crate::util::truncate_middle(ev["stderr"].as_str().unwrap_or("").trim(), 1000)}),
+                        });
+                    }
+                    _ => {}
                 }
             }
             "assistant" => {
@@ -196,7 +214,7 @@ pub fn parse_stream(raw: &str) -> RunRecord {
                         "thinking" => turn.thinking.push_str(b["thinking"].as_str().unwrap_or("")),
                         "tool_use" => turn.tool_calls.push(ToolCall {
                             id: b["id"].as_str().unwrap_or("").into(),
-                            name: b["name"].as_str().unwrap_or("").into(),
+                            name: normalize_tool_name(b["name"].as_str().unwrap_or("")),
                             input: b["input"].clone(),
                         }),
                         _ => {}
@@ -241,31 +259,35 @@ pub fn parse_stream(raw: &str) -> RunRecord {
                             "status={status} type={} resets_at={}",
                             info["rateLimitType"].as_str().unwrap_or("?"),
                             info["resetsAt"]
-                        ),
-                    });
+                        ), ..Default::default() });
                 }
             }
             "result" => {
                 let m = &mut rec.metrics;
-                let mut put = |k: &str, v: &Value| {
+                // A conversation run has one result event per user turn. Cost
+                // and API time are running totals; the rest are per turn.
+                fn put(m: &mut BTreeMap<String, f64>, k: &str, v: &Value, cumulative: bool) {
                     if let Some(f) = v.as_f64() {
-                        m.insert(k.to_string(), f);
+                        let e = m.entry(k.to_string()).or_insert(0.0);
+                        *e = if cumulative { f.max(*e) } else { *e + f };
                     }
-                };
-                put("cost_usd", &ev["total_cost_usd"]);
-                put("turns", &ev["num_turns"]);
-                put("duration_ms", &ev["duration_ms"]);
-                put("duration_api_ms", &ev["duration_api_ms"]);
-                put("ttft_ms", &ev["ttft_ms"]);
+                }
+                put(m, "cost_usd", &ev["total_cost_usd"], true);
+                put(m, "turns", &ev["num_turns"], false);
+                put(m, "duration_ms", &ev["duration_ms"], false);
+                put(m, "duration_api_ms", &ev["duration_api_ms"], true);
+                if !m.contains_key("ttft_ms") {
+                    put(m, "ttft_ms", &ev["ttft_ms"], true);
+                }
                 let u = &ev["usage"];
-                put("input_tokens", &u["input_tokens"]);
-                put("output_tokens", &u["output_tokens"]);
-                put("cache_read_tokens", &u["cache_read_input_tokens"]);
-                put("cache_creation_tokens", &u["cache_creation_input_tokens"]);
-                put("thinking_tokens", &u["output_tokens_details"]["thinking_tokens"]);
-                put("subagents_spawned", &ev["subagent_stats"]["spawned"]);
+                put(m, "input_tokens", &u["input_tokens"], false);
+                put(m, "output_tokens", &u["output_tokens"], false);
+                put(m, "cache_read_tokens", &u["cache_read_input_tokens"], false);
+                put(m, "cache_creation_tokens", &u["cache_creation_input_tokens"], false);
+                put(m, "thinking_tokens", &u["output_tokens_details"]["thinking_tokens"], false);
+                put(m, "subagents_spawned", &ev["subagent_stats"]["spawned"], true);
                 if let Some(d) = ev["permission_denials"].as_array() {
-                    m.insert("permission_denials".into(), d.len() as f64);
+                    *m.entry("permission_denials".into()).or_insert(0.0) += d.len() as f64;
                 }
                 if let Some(models) = ev["modelUsage"].as_object() {
                     m.insert("models_used".into(), models.len() as f64);
@@ -307,10 +329,7 @@ pub fn parse_stream(raw: &str) -> RunRecord {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SAMPLE: &str = r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","mcp_servers":[]}
+pub(crate) const SAMPLE: &str = r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","mcp_servers":[]}
 {"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"thinking","thinking":""}]}}
 {"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"pirate"}}]}}
 {"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Launching skill: pirate"},{"type":"text","text":"Base directory"}]}}
@@ -319,6 +338,11 @@ mod tests {
 {"type":"user","parent_tool_use_id":null,"message":{"content":[{"tool_use_id":"t2","type":"tool_result","content":[{"type":"text","text":"File created"}]}]}}
 {"type":"assistant","parent_tool_use_id":null,"message":{"id":"m3","content":[{"type":"text","text":"Done."}]}}
 {"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.004,"duration_ms":10211,"duration_api_ms":7994,"result":"Done.","usage":{"input_tokens":8,"cache_creation_input_tokens":100,"cache_read_input_tokens":892,"output_tokens":50,"output_tokens_details":{"thinking_tokens":20}},"permission_denials":[],"subagent_stats":{"spawned":0},"modelUsage":{"claude-haiku-5-5":{}}}"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
 
     #[test]
     fn parses_stream_json() {
@@ -337,6 +361,26 @@ mod tests {
         assert_eq!(rec.metrics["total_tokens"], 1050.0);
         assert!(rec.events.is_empty() && rec.error.is_none() && rec.rate_limited.is_none());
         assert_eq!(rec.transcript.skills_invoked(), vec!["pirate"]);
+        assert_eq!((rec.metrics["tool_calls_before_final"], rec.metrics["distinct_tools"]), (2.0, 2.0));
+    }
+
+    #[test]
+    fn hooks_mcp_names_and_turn_totals() {
+        let raw = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"mcp__filesystem__read_file","input":{"path":"a"}}]}}
+{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse"}
+{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"PreToolUse:Bash","hook_event":"PreToolUse","output":"hook-ran\n","stdout":"hook-ran\n","stderr":"","exit_code":0,"outcome":"success"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.001,"duration_ms":100,"result":"one","usage":{"input_tokens":2,"output_tokens":3}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m2","content":[{"type":"text","text":"two"}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.003,"duration_ms":50,"result":"two","usage":{"input_tokens":2,"output_tokens":4}}"#;
+        let rec = parse_stream(raw);
+        assert_eq!(rec.transcript.turns[0].tool_calls[0].name, "mcp.filesystem.read_file");
+        assert_eq!(rec.metrics["mcp.filesystem.read_file"], 1.0);
+        assert_eq!(rec.metrics["hook.PreToolUse"], 1.0);
+        let hook = &rec.events[0];
+        assert_eq!((hook.kind.as_str(), hook.data["matcher"].as_str(), hook.data["exit_code"].as_i64(), hook.data["output"].as_str()), ("hook", Some("Bash"), Some(0), Some("hook-ran")));
+        // Cost is a running total across turns; turns and tokens add up.
+        assert_eq!((rec.metrics["cost_usd"], rec.metrics["turns"], rec.metrics["output_tokens"], rec.metrics["duration_ms"]), (0.003, 3.0, 7.0, 150.0));
+        assert_eq!(rec.final_text, "two");
     }
 
     #[test]

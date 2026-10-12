@@ -170,6 +170,47 @@ fn claude_overlay_isolation_live() {
     ws.remove();
 }
 
+/// Hook executions are visible in the stream: an overlay that installs a
+/// `PreToolUse` hook on Bash yields `hook.PreToolUse` and a hook event that
+/// carries the matcher, exit code and output.
+#[test]
+fn claude_hooks_are_recorded_live() {
+    if !live("WRANGLER_LIVE") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path()).unwrap();
+    common::write(
+        tmp.path(),
+        "overlays/hooked/.claude/settings.json",
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo HOOK-SAW-BASH; exit 0"}]}]}}"#,
+    );
+    let t = task("Run the shell command `echo hi` once, then reply with the single word done.");
+    let v = variant("claude-code", Some("overlays/hooked"), Some("claude-haiku-5-5"));
+    let ws = Workspace::create(&project, &t, &tmp.path().join("run"), "live").unwrap();
+    let r = runner::get("claude-code").unwrap();
+    r.materialize(&ws, &v).unwrap();
+    ws.commit_baseline().unwrap();
+    let rec = r.run(&ws, &t, &v, &limits(Isolation::Workspace, NetworkPolicy::Full)).unwrap();
+    assert!(rec.error.is_none(), "{:?}\n{}", rec.error, rec.stderr);
+    assert!(rec.metrics.get("hook.PreToolUse").copied().unwrap_or(0.0) >= 1.0, "no PreToolUse hook recorded: {:?}", rec.metrics);
+    let hook = rec.events.iter().find(|e| e.kind == "hook" && e.data["event"] == "PreToolUse").expect("a hook event");
+    assert_eq!(hook.data["exit_code"], 0, "{hook:?}");
+    assert_eq!(hook.data["matcher"], "Bash", "{hook:?}");
+    assert!(hook.data["output"].as_str().unwrap_or("").contains("HOOK-SAW-BASH"), "{hook:?}");
+    // The graders that read the process agree with the stream.
+    let specs: Vec<DetSpec> = serde_json::from_value(serde_json::json!([
+        {"kind": "hook_fired", "event": "PreToolUse"},
+        {"kind": "sequence", "steps": [{"name": ["Bash", "shell"], "input": "echo hi"}]},
+        {"kind": "tool_call", "name": "Bash", "min": 1},
+    ]))
+    .unwrap();
+    let (_, diff) = ws.snapshot().unwrap();
+    let grades = wrangler_core::graders::deterministic::grade_all(&specs, &ws, &rec.final_text, &diff, &rec.transcript, Some(&rec.events), 1);
+    assert!(grades.iter().all(|g| g.passed == Some(true)), "{grades:#?}");
+    ws.remove();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn claude_seatbelt_confines_writes_live() {

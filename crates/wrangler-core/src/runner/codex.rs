@@ -68,6 +68,7 @@ impl AgentRunner for CodexRunner {
             system_prompt_append: Support::Approximate("appended to the workspace AGENTS.md, not the system prompt"),
             knob: Support::Full,
             seatbelt: Support::Approximate("Codex applies its own workspace-write seatbelt sandbox; the network policy setting is not applied"),
+            hooks: Support::Unsupported("Codex does not run Claude Code hooks, so there is nothing to report"),
             reports_cost: false,
         }
     }
@@ -204,7 +205,7 @@ pub fn parse_jsonl(raw: &str) -> RunRecord {
                     }
                     "web_search" => turn.tool_calls.push(ToolCall { id, name: "web_search".into(), input: json!({"query": it["query"]}) }),
                     "error" => {
-                        rec.events.push(RunEvent { kind: "error".into(), at_ms: 0, detail: error_text(it["message"].as_str().unwrap_or("")) });
+                        rec.events.push(RunEvent { kind: "error".into(), at_ms: 0, detail: error_text(it["message"].as_str().unwrap_or("")), ..Default::default() });
                         continue;
                     }
                     _ => continue,

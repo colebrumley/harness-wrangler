@@ -273,6 +273,8 @@ button.pip { cursor: pointer; }
 .turn .who { font-size: 12px; font-weight: 600; color: var(--ink-2); }
 .turn pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.5 var(--mono); max-height: 320px; overflow: auto; background: var(--sunk); padding: 8px 10px; border-radius: 6px; }
 .turn .text { white-space: pre-wrap; }
+.turn.simulated { border-color: var(--warn); background: var(--warn-soft); padding: 6px 12px; border-radius: 0 6px 6px 0; }
+.turn details.focus > summary { background: var(--warn-soft); border-radius: 4px; }
 .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 18px; }
 .kv div span { display: block; font-size: 12px; color: var(--ink-2); }
 .kv div b { font-weight: 600; font-size: 15px; }

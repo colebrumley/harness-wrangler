@@ -275,6 +275,16 @@ pub struct JudgeCfg {
     /// Repetitions paired per task and variant pair. Default min(runs_per_cell, 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairwise_reps: Option<u32>,
+    /// `tools`: also show the judge a compact trace of the agent's tool
+    /// calls (name and one-line input, no results). Default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+}
+
+impl JudgeCfg {
+    pub fn shows_tools(&self) -> bool {
+        self.transcript.as_deref() == Some("tools")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +373,49 @@ pub struct Fixture {
     pub git_ref: Option<String>,
 }
 
+/// A tool name, or several that count as the same tool across runners
+/// (`["Bash", "shell"]`). A trailing `*` matches a prefix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Names {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Names {
+    pub fn list(&self) -> Vec<&str> {
+        match self {
+            Names::One(s) => vec![s.as_str()],
+            Names::Many(v) => v.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+    pub fn matches(&self, tool: &str) -> bool {
+        self.list().iter().any(|p| crate::transcript::tool_name_matches(p, tool))
+    }
+    pub fn display(&self) -> String {
+        self.list().join("|")
+    }
+}
+
+/// One step of a `sequence` grader: a tool call by name, optionally with a
+/// regex over its JSON-serialized input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeqStep {
+    pub name: Names,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
+}
+
+fn default_one() -> Option<u64> {
+    Some(1)
+}
+fn default_include() -> String {
+    "include".into()
+}
+fn default_assistant() -> String {
+    "assistant".into()
+}
+
 /// Deterministic grader specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -431,6 +484,53 @@ pub enum DetSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    /// Passes when the number of matching tool calls is within bounds.
+    /// `name` is the tool here, so this grader's own name is `label`.
+    ToolCall {
+        #[serde(alias = "tool")]
+        name: Names,
+        /// Regex over the JSON-serialized input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default = "default_one", skip_serializing_if = "Option::is_none")]
+        min: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u64>,
+        /// include | exclude | only
+        #[serde(default = "default_include")]
+        subagents: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Passes when each step matches a tool call, in order, each after the
+    /// previous; with `before_final`, all before the last assistant message.
+    Sequence {
+        steps: Vec<SeqStep>,
+        #[serde(default = "default_true")]
+        before_final: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Regex over the transcript text: assistant | tool_results | thinking | all.
+    TranscriptRegex {
+        pattern: String,
+        #[serde(default = "default_assistant")]
+        scope: String,
+        #[serde(default = "default_true")]
+        should_match: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Passes when the count of hook executions for an event is within bounds.
+    HookFired {
+        event: String,
+        #[serde(default = "default_one", skip_serializing_if = "Option::is_none")]
+        min: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 impl DetSpec {
@@ -443,6 +543,10 @@ impl DetSpec {
             DetSpec::WordCount { .. } => "word_count",
             DetSpec::JsonSchema { .. } => "json_schema",
             DetSpec::SkillInvoked { .. } => "skill_invoked",
+            DetSpec::ToolCall { .. } => "tool_call",
+            DetSpec::Sequence { .. } => "sequence",
+            DetSpec::TranscriptRegex { .. } => "transcript_regex",
+            DetSpec::HookFired { .. } => "hook_fired",
         }
     }
     pub fn name(&self) -> Option<&str> {
@@ -453,7 +557,11 @@ impl DetSpec {
             | DetSpec::DiffSize { name, .. }
             | DetSpec::WordCount { name, .. }
             | DetSpec::JsonSchema { name, .. }
-            | DetSpec::SkillInvoked { name, .. } => name.as_deref(),
+            | DetSpec::SkillInvoked { name, .. }
+            | DetSpec::Sequence { name, .. }
+            | DetSpec::TranscriptRegex { name, .. }
+            | DetSpec::HookFired { name, .. } => name.as_deref(),
+            DetSpec::ToolCall { label, .. } => label.as_deref(),
         }
     }
 }

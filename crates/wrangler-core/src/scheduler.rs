@@ -254,8 +254,8 @@ fn execute_run(
                 Some(detail) if attempt < exp.runner.max_retries && !cancel.load(Ordering::Relaxed) => {
                     let wait = backoff(attempt);
                     attempt += 1;
-                    events.push(RunEvent { kind: "rate_limit".into(), at_ms: offset, detail: detail.clone() });
-                    events.push(RunEvent { kind: "retry".into(), at_ms: offset, detail: format!("attempt {attempt} after {}s backoff", wait.as_secs()) });
+                    events.push(RunEvent { kind: "rate_limit".into(), at_ms: offset, detail: detail.clone(), ..Default::default() });
+                    events.push(RunEvent { kind: "retry".into(), at_ms: offset, detail: format!("attempt {attempt} after {}s backoff", wait.as_secs()), ..Default::default() });
                     sink(Event::RateLimited { run_id: run.id, wait_s: wait.as_secs(), attempt, detail: detail.clone() });
                     sleep_cancellable(wait, cancel);
                     ws.reset_to_baseline()?;
@@ -266,10 +266,10 @@ fn execute_run(
         let status = if rec.cancelled {
             "cancelled"
         } else if rec.timed_out {
-            events.push(RunEvent { kind: "timeout".into(), at_ms: rec.wall_ms, detail: format!("killed after {}s", limits.timeout.as_secs()) });
+            events.push(RunEvent { kind: "timeout".into(), at_ms: rec.wall_ms, detail: format!("killed after {}s", limits.timeout.as_secs()), ..Default::default() });
             "timeout"
         } else if let Some(limit) = &rec.limit_hit {
-            events.push(RunEvent { kind: "limit".into(), at_ms: rec.wall_ms, detail: limit.clone() });
+            events.push(RunEvent { kind: "limit".into(), at_ms: rec.wall_ms, detail: limit.clone(), ..Default::default() });
             "timeout"
         } else if rec.error.is_some() {
             "failed"
@@ -321,12 +321,18 @@ fn execute_run(
         if status == "done" || status == "timeout" {
             let mut specs = exp.default_graders().deterministic;
             specs.extend(task.graders.deterministic.iter().cloned());
-            grades = grade_all(&specs, &ws, &output_text, &diff, &rec.transcript, run.id);
+            let hooks = matches!(runner.capabilities().hooks, runner::Support::Full).then_some(events.as_slice());
+            grades = grade_all(&specs, &ws, &output_text, &diff, &rec.transcript, hooks, run.id);
             if !grades.is_empty() {
                 let all = grades.iter().all(|g| g.passed == Some(true));
                 rec.metrics.insert("pass".into(), if all { 1.0 } else { 0.0 });
                 let frac = grades.iter().filter(|g| g.passed == Some(true)).count() as f64 / grades.len() as f64;
                 rec.metrics.insert("checks_passed".into(), frac);
+                // Each check is also its own pass metric, so a process check
+                // ("tests-run-first") can be compared across variants.
+                for g in &grades {
+                    rec.metrics.insert(format!("check.{}", g.grader), if g.passed == Some(true) { 1.0 } else { 0.0 });
+                }
             }
         }
         let error = match (&rec.error, status) {
@@ -387,7 +393,21 @@ pub fn shown_for(run: &RunRow, task: &Task) -> Shown {
         (Some(f), true) => diff_without(&patch, f),
         _ => patch,
     };
-    Shown { output: run.output_text.clone(), diff, output_is_file }
+    Shown { output: run.output_text.clone(), diff, output_is_file, ..Default::default() }
+}
+
+/// What the judge is shown: the same as a reviewer, plus the tool-call
+/// trace when the judge is configured with `transcript = "tools"`.
+pub fn shown_for_judge(run: &RunRow, task: &Task, cfg: &JudgeCfg) -> Shown {
+    let mut shown = shown_for(run, task);
+    if cfg.shows_tools() {
+        shown.trace = load_transcript(run).tool_trace(200);
+    }
+    shown
+}
+
+pub fn load_transcript(run: &RunRow) -> crate::transcript::Transcript {
+    std::fs::read_to_string(std::path::Path::new(&run.dir).join("transcript.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 /// Run pairs the pairwise judge compares: same task, same repetition,
@@ -465,16 +485,21 @@ pub fn judge_launch(project: &Project, store: &Store, launch_id: i64, concurrenc
             let done = AtomicUsize::new(0);
             parallel_for(&todo, concurrency, cancel, &|run: &&RunRow| {
                 let task = task_of(&run.task_id).unwrap();
-                match judge::score_run(backend.as_ref(), &cfg, task, rubric.as_deref(), &shown_for(run, task), cancel) {
+                let shown = shown_for_judge(run, task, &cfg);
+                match judge::score_run(backend.as_ref(), &cfg, task, rubric.as_deref(), &shown, cancel) {
                     Ok(r) => {
                         let frac = r.pass_fraction();
+                        let mut detail = json!({"expectations": r.expectations, "summary": r.summary, "model": cfg.model, "effort": cfg.effort, "rubric": cfg.rubric});
+                        if cfg.shows_tools() {
+                            detail["tool_trace"] = json!(shown.trace);
+                        }
                         let _ = store.put_grade(&Grade {
                             run_id: run.id,
                             grader: "judge".into(),
                             tier: "judge".into(),
                             passed: frac.map(|f| f >= 1.0),
                             score: Some(r.score),
-                            detail: json!({"expectations": r.expectations, "summary": r.summary, "model": cfg.model, "effort": cfg.effort, "rubric": cfg.rubric}),
+                            detail,
                         });
                         let _ = store.set_metric(run.id, "judge_score", r.score);
                         if let Some(f) = frac {
@@ -499,8 +524,14 @@ pub fn judge_launch(project: &Project, store: &Store, launch_id: i64, concurrenc
             let by_id: HashMap<i64, &RunRow> = runs.iter().map(|r| (r.id, r)).collect();
             parallel_for(&pairs, concurrency, cancel, &|(task_id, a, b): &(String, i64, i64)| {
                 let task = task_of(task_id).unwrap();
-                match judge::compare(backend.as_ref(), &cfg, task, rubric.as_deref(), &shown_for(by_id[a], task), &shown_for(by_id[b], task), cancel) {
+                let (sa, sb) = (shown_for_judge(by_id[a], task, &cfg), shown_for_judge(by_id[b], task, &cfg));
+                match judge::compare(backend.as_ref(), &cfg, task, rubric.as_deref(), &sa, &sb, cancel) {
                     Ok(r) => {
+                        let mut detail = json!({"first_pick": r.first_pick, "second_pick": r.second_pick, "first_reason": r.first_reason, "second_reason": r.second_reason, "cost_usd": r.cost_usd, "model": cfg.model});
+                        if cfg.shows_tools() {
+                            detail["tool_trace_a"] = json!(sa.trace);
+                            detail["tool_trace_b"] = json!(sb.trace);
+                        }
                         let _ = store.add_judgment(&Judgment {
                             id: 0,
                             launch_id,
@@ -511,7 +542,7 @@ pub fn judge_launch(project: &Project, store: &Store, launch_id: i64, concurrenc
                             winner: r.winner.clone(),
                             reason: r.first_reason.clone(),
                             consistent: Some(r.consistent),
-                            detail: json!({"first_pick": r.first_pick, "second_pick": r.second_pick, "first_reason": r.first_reason, "second_reason": r.second_reason, "cost_usd": r.cost_usd, "model": cfg.model}),
+                            detail,
                             created_at: String::new(),
                         });
                     }

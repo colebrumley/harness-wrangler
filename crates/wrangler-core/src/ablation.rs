@@ -288,7 +288,7 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
         graders.insert(
             "default".to_string(),
             GraderDefaults {
-                judge: Some(JudgeCfg { model: m.clone(), effort: None, rubric: req.rubric.clone(), rubric_scoring: true, pairwise: false, pairwise_mode: None, pairwise_reps: None }),
+                judge: Some(JudgeCfg { model: m.clone(), effort: None, rubric: req.rubric.clone(), rubric_scoring: true, pairwise: false, pairwise_mode: None, pairwise_reps: None, transcript: None }),
                 human: None,
                 deterministic: vec![],
             },

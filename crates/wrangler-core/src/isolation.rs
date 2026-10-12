@@ -120,12 +120,12 @@ impl Sandbox {
 
     /// Stop the proxy and report what it blocked.
     pub fn finish(self) -> Vec<RunEvent> {
-        let mut events = vec![RunEvent { kind: "sandbox".into(), at_ms: 0, detail: "ran under seatbelt".into() }];
+        let mut events = vec![RunEvent { kind: "sandbox".into(), at_ms: 0, detail: "ran under seatbelt".into(), ..Default::default() }];
         if let Some(p) = self.proxy {
             let (allowed, blocked) = p.stop();
-            events.push(RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("network proxy: {allowed} connections allowed") });
+            events.push(RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("network proxy: {allowed} connections allowed"), ..Default::default() });
             for host in blocked {
-                events.push(RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("network blocked: {host}") });
+                events.push(RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("network blocked: {host}"), ..Default::default() });
             }
         }
         events
@@ -220,7 +220,7 @@ impl DockerRun {
     /// Make sure the container is gone (a killed client can leave it running).
     pub fn finish(self) -> Vec<RunEvent> {
         let _ = std::process::Command::new("docker").args(["rm", "-f", &self.name]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
-        vec![RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("ran in docker container {}", self.name) }]
+        vec![RunEvent { kind: "sandbox".into(), at_ms: 0, detail: format!("ran in docker container {}", self.name), ..Default::default() }]
     }
 }
 

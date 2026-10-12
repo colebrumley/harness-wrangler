@@ -58,14 +58,22 @@ pub fn metric_info(name: &str) -> MetricInfo {
         "cache_creation_tokens" => ("Cache write tokens", None, Positive, "tok"),
         "turns" => ("Turns", None, Positive, ""),
         "tool_calls" => ("Tool calls", None, Positive, ""),
+        "tool_calls_before_final" => ("Tool calls before final", None, Positive, ""),
+        "distinct_tools" => ("Distinct tools", None, Positive, ""),
         "diff_lines" => ("Diff size", None, Positive, "lines"),
         "files_touched" => ("Files touched", None, Positive, ""),
         "output_words" => ("Output words", None, Positive, "words"),
         "retries" => ("Rate-limit retries", Lower, Positive, ""),
         "permission_denials" => ("Permission denials", Lower, Positive, ""),
+        // One deterministic grader's own pass rate.
+        _ if name.starts_with("check.") => ("", Higher, Rate, ""),
         _ => ("", None, Positive, ""),
     };
-    let label = if label.is_empty() { name.to_string() } else { label.to_string() };
+    let label = match (label.is_empty(), name.strip_prefix("check.")) {
+        (false, _) => label.to_string(),
+        (true, Some(check)) => format!("Check: {check}"),
+        (true, Option::None) => name.to_string(),
+    };
     MetricInfo { name: name.to_string(), label, direction, scale, unit: unit.to_string() }
 }
 

@@ -67,6 +67,7 @@ export function info(name: string): MetricInfo {
     wall_time_s: { name, label: "Wall time", direction: "lower", scale: "positive", unit: "s" },
     total_tokens: { name, label: "Total tokens", direction: "lower", scale: "positive", unit: "tok" },
   };
+  if (name.startsWith("check.")) return { name, label: `Check: ${name.slice(6)}`, direction: "higher", scale: "rate", unit: "" };
   return fallback[name] ?? { name, label: name, direction: "none", scale: "positive", unit: "" };
 }
 

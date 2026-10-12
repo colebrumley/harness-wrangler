@@ -26,6 +26,9 @@ pub struct Turn {
     /// True for turns produced inside a subagent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subagent: bool,
+    /// True for user turns written by the simulated user in a conversation task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -43,9 +46,105 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// A tool call with where it sits in the transcript.
+#[derive(Debug, Clone, Copy)]
+pub struct CallAt<'a> {
+    /// Index of the turn that made the call.
+    pub turn: usize,
+    pub call: &'a ToolCall,
+    pub subagent: bool,
+}
+
+/// Runner-neutral tool name: Claude Code's `mcp__server__tool` becomes
+/// `mcp.server.tool`, the form Codex already reports.
+pub fn normalize_tool_name(name: &str) -> String {
+    match name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+        Some((server, tool)) if !server.is_empty() && !tool.is_empty() => format!("mcp.{server}.{tool}"),
+        _ => name.to_string(),
+    }
+}
+
+/// Does a tool name match a pattern? Exact, or a prefix when the pattern
+/// ends in `*` (`mcp.filesystem.*`).
+pub fn tool_name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    }
+}
+
+/// One line describing a call's input: the command, path or query when
+/// there is one, else the compact JSON.
+pub fn input_summary(input: &Value, max: usize) -> String {
+    let pick = ["command", "file_path", "path", "pattern", "query", "url", "skill", "description", "prompt"].iter().find_map(|k| input.get(*k).and_then(|v| v.as_str()));
+    let text = match pick {
+        Some(s) => s.to_string(),
+        None if input.is_null() => String::new(),
+        None => input.to_string(),
+    };
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > max {
+        format!("{}…", one_line.chars().take(max).collect::<String>())
+    } else {
+        one_line
+    }
+}
+
 impl Transcript {
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
         self.turns.iter().flat_map(|t| t.tool_calls.iter())
+    }
+
+    /// Every tool call in order, with its turn index, so a grader knows
+    /// where it falls relative to the final message.
+    pub fn tool_calls_with_turn(&self) -> Vec<CallAt<'_>> {
+        self.turns.iter().enumerate().flat_map(|(i, t)| t.tool_calls.iter().map(move |c| CallAt { turn: i, call: c, subagent: t.subagent })).collect()
+    }
+
+    /// Index of the turn holding the final message: the last assistant
+    /// turn with text outside subagents.
+    pub fn final_turn(&self) -> Option<usize> {
+        self.turns.iter().rposition(|t| t.role == "assistant" && !t.subagent && !t.text.trim().is_empty())
+    }
+
+    /// Tool calls made before the final message (all of them when there is none).
+    pub fn calls_before_final(&self) -> usize {
+        let end = self.final_turn().unwrap_or(self.turns.len());
+        self.tool_calls_with_turn().iter().filter(|c| c.turn < end).count()
+    }
+
+    /// Compact process trace for judges: one line per tool call, no results.
+    pub fn tool_trace(&self, max_calls: usize) -> String {
+        let calls = self.tool_calls_with_turn();
+        let mut s = String::new();
+        for (i, c) in calls.iter().take(max_calls).enumerate() {
+            let sub = if c.subagent { " (subagent)" } else { "" };
+            s.push_str(&format!("{}. {}{sub}: {}\n", i + 1, c.call.name, input_summary(&c.call.input, 160)));
+        }
+        if calls.len() > max_calls {
+            s.push_str(&format!("[... {} more tool calls ...]\n", calls.len() - max_calls));
+        }
+        s
+    }
+
+    /// Simulated-user turns in a conversation run.
+    pub fn user_turns(&self) -> usize {
+        self.turns.iter().filter(|t| t.role == "user" && t.simulated).count()
+    }
+
+    /// How often the agent asked the user something: assistant turns
+    /// (outside subagents) whose text ends in a question, plus
+    /// `AskUserQuestion` tool calls.
+    pub fn questions_asked(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|t| t.role == "assistant" && !t.subagent)
+            .map(|t| {
+                let asks = t.tool_calls.iter().filter(|c| c.name == "AskUserQuestion").count();
+                let ends = t.text.trim_end().trim_end_matches(|c: char| matches!(c, '*' | '_' | '`' | ')' | '"' | '\'')).ends_with('?');
+                asks + usize::from(ends && asks == 0 && t.tool_calls.is_empty())
+            })
+            .sum()
     }
 
     /// Last non-empty assistant text outside subagents.
@@ -94,7 +193,7 @@ impl Transcript {
     pub fn render(&self, max_result_chars: usize) -> String {
         let mut s = String::new();
         for t in &self.turns {
-            let who = if t.subagent { format!("{} (subagent)", t.role) } else { t.role.clone() };
+            let who = if t.subagent { format!("{} (subagent)", t.role) } else if t.simulated { "user (simulated)".to_string() } else { t.role.clone() };
             if !t.text.trim().is_empty() {
                 s.push_str(&format!("[{who}]\n{}\n\n", t.text.trim()));
             }
@@ -130,5 +229,27 @@ mod tests {
             }],
         };
         assert_eq!(t.skills_invoked(), vec!["pirate", "rfw", "other"]);
+    }
+
+    #[test]
+    fn names_order_and_questions() {
+        assert_eq!(normalize_tool_name("mcp__filesystem__read_file"), "mcp.filesystem.read_file");
+        assert_eq!(normalize_tool_name("mcp__a__b__c"), "mcp.a.b__c");
+        assert_eq!(normalize_tool_name("Bash"), "Bash");
+        assert!(tool_name_matches("mcp.fs.*", "mcp.fs.read") && !tool_name_matches("mcp.fs.*", "mcp.other.read") && tool_name_matches("Bash", "Bash"));
+        let call = |id: &str, name: &str| ToolCall { id: id.into(), name: name.into(), input: json!({"command": "ls  -la\n/tmp"}) };
+        let t = Transcript {
+            turns: vec![
+                Turn { role: "assistant".into(), text: "Which test fails?".into(), ..Default::default() },
+                Turn { role: "user".into(), text: "The unicode one.".into(), simulated: true, ..Default::default() },
+                Turn { role: "assistant".into(), tool_calls: vec![call("1", "Bash")], ..Default::default() },
+                Turn { role: "assistant".into(), text: "Fixed.".into(), ..Default::default() },
+                Turn { role: "assistant".into(), tool_calls: vec![call("2", "Bash")], ..Default::default() },
+            ],
+        };
+        assert_eq!(t.final_turn(), Some(3));
+        assert_eq!(t.calls_before_final(), 1);
+        assert_eq!((t.user_turns(), t.questions_asked()), (1, 1));
+        assert_eq!(t.tool_trace(1), "1. Bash: ls -la /tmp\n[... 1 more tool calls ...]\n");
     }
 }

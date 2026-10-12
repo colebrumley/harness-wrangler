@@ -18,6 +18,7 @@ use std::time::Duration;
 
 const MAX_OUTPUT_CHARS: usize = 60_000;
 const MAX_DIFF_CHARS: usize = 30_000;
+const MAX_TRACE_CHARS: usize = 12_000;
 
 pub struct JudgeReply {
     pub value: Value,
@@ -186,6 +187,8 @@ pub struct Shown {
     pub diff: String,
     /// True when the output is a file in the workspace rather than the final message.
     pub output_is_file: bool,
+    /// Compact tool-call trace, shown only with `judge = { transcript = "tools" }`.
+    pub trace: String,
 }
 
 fn task_block(task: &Task, rubric: Option<&str>) -> String {
@@ -205,6 +208,10 @@ fn shown_block(tag: &str, shown: &Shown) -> String {
     // above; the diff adds only the other files the agent changed.
     if !shown.diff.trim().is_empty() {
         s.push_str(&format!("<{tag}_workspace_diff>\n{}\n</{tag}_workspace_diff>\n", truncate_middle(shown.diff.trim(), MAX_DIFF_CHARS)));
+    }
+    // The process, when the experiment asks for it: tool names and one-line inputs, in order.
+    if !shown.trace.trim().is_empty() {
+        s.push_str(&format!("<{tag}_tool_calls>\n{}\n</{tag}_tool_calls>\n", truncate_middle(shown.trace.trim(), MAX_TRACE_CHARS)));
     }
     s
 }
@@ -334,7 +341,7 @@ mod tests {
         Task::parse("id='t'\nprompt='Summarize'\nexpectations=['Leads with impact','Under 150 words','No hedging']\n").unwrap()
     }
     fn cfg() -> JudgeCfg {
-        JudgeCfg { model: "mock".into(), effort: None, rubric: None, rubric_scoring: true, pairwise: true, pairwise_mode: None, pairwise_reps: None }
+        JudgeCfg { model: "mock".into(), effort: None, rubric: None, rubric_scoring: true, pairwise: true, pairwise_mode: None, pairwise_reps: None, transcript: None }
     }
     fn shown(q: f64) -> Shown {
         Shown { output: format!("text QUALITY={q:.3}"), ..Default::default() }
@@ -359,8 +366,13 @@ mod tests {
 
     #[test]
     fn prompts_carry_the_material() {
-        let p = pairwise_prompt(&task(), Some("RUBRIC-TEXT"), &shown(0.1), &Shown { output: "o".into(), diff: "+added".into(), output_is_file: true });
+        let p = pairwise_prompt(&task(), Some("RUBRIC-TEXT"), &shown(0.1), &Shown { output: "o".into(), diff: "+added".into(), output_is_file: true, ..Default::default() });
         assert!(p.contains("RUBRIC-TEXT") && p.contains("<output_a>") && p.contains("<output_b_workspace_diff>") && p.contains("2. Under 150 words"));
         assert!(!p.to_lowercase().contains("skill"), "pairwise prompt must stay blind to configuration");
+        assert!(!p.contains("_tool_calls>"), "no trace unless asked for");
+        let with = Shown { output: "o".into(), trace: "1. Bash: pytest -q\n".into(), ..Default::default() };
+        let p = rubric_prompt(&task(), None, &with);
+        assert!(p.contains("<output_tool_calls>\n1. Bash: pytest -q\n</output_tool_calls>"));
+        assert!(pairwise_prompt(&task(), None, &with, &shown(0.1)).contains("<output_a_tool_calls>"));
     }
 }

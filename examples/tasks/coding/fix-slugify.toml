@@ -14,4 +14,5 @@ deterministic = [
   { kind = "command", cmd = "python3 -m unittest discover -s tests -q", name = "tests-pass" },
   { kind = "command", cmd = "git diff --quiet wrangler-baseline -- tests", name = "tests-untouched" },
   { kind = "diff_size", max = 20 },
+  { kind = "sequence", steps = [{ name = ["Bash", "shell"], input = "unittest|pytest" }], before_final = true, name = "tests-run-first" },
 ]

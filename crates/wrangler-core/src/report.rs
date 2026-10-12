@@ -263,6 +263,11 @@ impl Data {
     pub fn available_metrics(&self) -> Vec<String> {
         let present: BTreeSet<&str> = self.metrics.values().flat_map(|m| m.keys().map(|k| k.as_str())).collect();
         let mut out: Vec<String> = stats::HEADLINE.iter().filter(|m| present.contains(**m)).map(|s| s.to_string()).collect();
+        // Per-check pass rates, when a task has more than one check to tell apart.
+        let checks: Vec<&str> = present.iter().copied().filter(|m| m.starts_with("check.")).collect();
+        if checks.len() > 1 {
+            out.extend(checks.iter().map(|s| s.to_string()));
+        }
         if present.contains("mock_quality") {
             out.push("mock_quality".into());
         }

@@ -77,12 +77,13 @@ A level can be written as a table to give it a label: `{ value = "overlays/rfw-v
 
 ### Judge options
 
-`judge = { model, effort, rubric, rubric_scoring = true, pairwise = false, pairwise_mode, pairwise_reps }`
+`judge = { model, effort, rubric, rubric_scoring = true, pairwise = false, pairwise_mode, pairwise_reps, transcript }`
 
 - `rubric_scoring` scores each run 1 to 10 and checks each task expectation, with quoted evidence.
 - `pairwise` compares runs of the same task blind, in both orders.
 - `pairwise_mode`: `all` variant pairs, or `baseline` (each variant against the first). Default is `all` up to four variants.
 - `pairwise_reps`: repetitions paired per task and variant pair. Default `min(runs_per_cell, 3)`.
+- `transcript = "tools"` also shows the judge the process: one line per tool call (name and a short input, no results), in order. Off by default; when on, the trace is stored with each judgment.
 
 ## Task
 
@@ -117,6 +118,27 @@ deterministic = [
 | `word_count` | `path`, `min`, `max` | word count is within bounds |
 | `json_schema` | `path`, `schema` or `schema_file` | the JSON validates |
 | `skill_invoked` | `skill`, `expect = true` | the skill was (or was not) invoked |
+| `tool_call` | `name` (string or list), `input`, `min = 1`, `max`, `subagents = "include"`, `label` | the count of matching tool calls is within bounds |
+| `sequence` | `steps = [{ name, input }, ...]`, `before_final = true` | each step matches a tool call, in order, each after the previous; with `before_final`, all before the last assistant message |
+| `transcript_regex` | `pattern`, `scope = "assistant"`, `should_match = true` | the pattern matches the chosen text |
+| `hook_fired` | `event`, `min = 1`, `max` | the count of hook executions for that event is within bounds |
+
+The last four read the normalized transcript, so they grade the process and not the result: "ran the tests before finishing", "read the file before editing it", "never called `rm`".
+
+- A tool `name` is exact, or a prefix when it ends in `*` (`mcp.filesystem.*`). A list covers both runners with one grader: `name = ["Bash", "shell"]`. In `tool_call`, `name` is the tool, so the grader's own name is `label`.
+- `input` is a regex over the call's input serialized as JSON: `input = "unittest|pytest"` matches a Bash call whose command runs either.
+- `subagents` is `include`, `exclude` or `only`.
+- `transcript_regex` scopes: `assistant` (the agent's messages), `tool_results`, `thinking`, or `all` (those three plus user turns).
+- `hook_fired` counts hook executions by event name (`PreToolUse`, `PostToolUse`, `Stop`, ...). Claude Code reports hooks; Codex and the mock runner do not, and there the grader fails with "runner does not report hooks" instead of passing with nothing to count.
+- Each of these records what it matched in the grade's detail (call ids, the turn of each, a one-line input), and a failed `sequence` names the missing step and why: never called, out of order, or only after the final message. The run page links each matched call to its turn.
+
+```toml
+deterministic = [
+  { kind = "sequence", steps = [{ name = ["Bash", "shell"], input = "unittest|pytest" }], before_final = true, name = "tests-run-first" },
+  { kind = "tool_call", name = "Edit", input = "tests/", max = 0, min = 0, label = "tests-not-edited" },
+  { kind = "hook_fired", event = "PreToolUse" },
+]
+```
 
 Every grader takes an optional `name`. Give a fixture a `.gitignore` for build debris (`__pycache__/`, `node_modules/`): ignored files stay out of the diff, `diff_size` and `files_touched`.
 
@@ -124,7 +146,7 @@ Every grader takes an optional `name`. The baseline commit is tagged `wrangler-b
 
 ## Metrics
 
-Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `skill_invoked`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
+Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `skill_invoked`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `mcp.<server>.<tool>`, `tool_calls_before_final`, `distinct_tools`, `hook.<Event>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
 
 ## Suite
 
@@ -148,4 +170,6 @@ The normalized transcript is the same for every runner:
                "tool_results": [ { "tool_use_id": "", "content": "", "is_error": false } ] } ] }
 ```
 
-Codex shell commands appear as `shell` tool calls and file changes as `apply_patch`.
+Codex shell commands appear as `shell` tool calls and file changes as `apply_patch`. MCP tools are named `mcp.<server>.<tool>` under both runners (Claude Code's own `mcp__server__tool` is rewritten).
+
+`hook.<Event>` counts the hook executions Claude Code reported for that event. Each is also a run event of kind `hook` carrying the event name, matcher, exit code and output; `wrangler show <run>` lists them.

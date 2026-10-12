@@ -30,6 +30,7 @@ impl AgentRunner for MockRunner {
             system_prompt_append: Support::Full,
             knob: Support::Full,
             seatbelt: Support::Approximate("the mock runner starts no process, so nothing is sandboxed"),
+            hooks: Support::Unsupported("the mock runner runs no hooks"),
             reports_cost: true,
         }
     }
