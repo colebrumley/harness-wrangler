@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 pub struct Suggestion {
     pub id: String,
     /// remove_section | review_section | keep_section | retire_pattern | drop_pattern |
-    /// keep_pattern | no_headroom | fix_trigger | trim_body | change_level | tradeoff |
+    /// keep_pattern | no_headroom | trigger_misses | trigger_overfires | trim_body | change_level | tradeoff |
     /// flaky_task | more_runs | judge_bias | reviewer_flag | failures
     pub kind: String,
     /// 1 is most urgent.
@@ -111,6 +111,7 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
     // ---- ablation: per-section attribution
     if let Some(ab) = &r.ablation {
         let target = |s: &report::SectionAttribution| json!({"type": "section", "file": ab.source, "section": s.index + 1, "title": s.title, "lines": [s.lines.0, s.lines.1]});
+        let part = if ab.mode == "description_sentences" { "description sentence" } else { "section" };
         for s in &ab.sections {
             let Some(e) = &s.effect else { continue };
             let saved = s.tokens_effect.as_ref().filter(|t| t.effect > 0.0).map(|t| format!("measured {} per run", report::fmt_delta(&stats::metric_info("total_tokens"), -t.effect))).unwrap_or_else(|| format!("~{} tokens of instructions", s.est_tokens));
@@ -119,9 +120,9 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             ev["tokens_effect"] = json!(s.tokens_effect.as_ref().map(|t| t.effect));
             ev["cost_effect"] = json!(s.cost_effect.as_ref().map(|t| t.effect));
             match s.attribution.as_str() {
-                "hurts" => push("review_section", 1, format!("Review or remove section {} \"{}\": it {}{on_model}.", s.index + 1, s.title, moves(&pinfo, e)), target(s), &pm, ev, "high"),
-                "no_effect" => push("remove_section", 2, format!("Remove section {} \"{}\": no measurable effect on {} ({}){on_model}; saves {saved}.", s.index + 1, s.title, pinfo.label.to_lowercase(), ci(&pinfo, e)), target(s), &pm, ev, "medium"),
-                "carries" => push("keep_section", 8, format!("Keep section {} \"{}\": it contributes {} to {}{on_model}.", s.index + 1, s.title, ci(&pinfo, e), pinfo.label.to_lowercase()), target(s), &pm, ev, "high"),
+                "hurts" => push("review_section", 1, format!("Review or remove {part} {} \"{}\": it {}{on_model}.", s.index + 1, s.title, moves(&pinfo, e)), target(s), &pm, ev, "high"),
+                "no_effect" => push("remove_section", 2, format!("Remove {part} {} \"{}\": no measurable effect on {} ({}){on_model}; saves {saved}.", s.index + 1, s.title, pinfo.label.to_lowercase(), ci(&pinfo, e)), target(s), &pm, ev, "medium"),
+                "carries" => push("keep_section", 8, format!("Keep {part} {} \"{}\": it contributes {} to {}{on_model}.", s.index + 1, s.title, ci(&pinfo, e), pinfo.label.to_lowercase()), target(s), &pm, ev, "high"),
                 _ => {}
             }
         }
@@ -146,8 +147,51 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
         }
     }
 
-    // ---- skills that do not trigger
-    for v in r.variants.iter().filter(|v| v.metrics.contains_key("skill_invoked")) {
+    // ---- triggering: misses (recall) and overfires (precision)
+    let describe = |variant_key: &str| -> Value {
+        let skills = launch.variants.iter().find(|v| v.key == variant_key).map(|v| v.skills.clone()).unwrap_or_default();
+        json!(skills.iter().map(|s| json!({"skill": s.name, "description": s.description})).collect::<Vec<_>>())
+    };
+    if let Some(t) = &r.trigger {
+        let prompts = |ps: &[report::TriggerPrompt]| json!(ps.iter().map(|p| json!({"task": p.task_id, "prompt": p.prompt, "fire_rate": p.fire_rate, "runs": p.runs})).collect::<Vec<_>>());
+        let names = |ps: &[report::TriggerPrompt]| ps.iter().map(|p| p.task_id.as_str()).collect::<Vec<_>>().join(", ");
+        // The sentence whose removal raised precision the most, when a description ablation ran.
+        let culprit = r.ablation.as_ref().filter(|a| a.mode == "description_sentences").and_then(|a| {
+            a.sections.iter().filter_map(|s| Some((s, s.precision_effect.as_ref()?))).filter(|(_, e)| e.effect < 0.0).min_by(|x, y| x.1.effect.total_cmp(&y.1.effect)).map(|(s, e)| (s.title.clone(), e.clone()))
+        });
+        for v in &t.variants {
+            // A variant that does not install the skill has nothing to tune.
+            let Some(description) = &v.description else { continue };
+            let target = json!({"type": "skill_description", "skills": t.skills, "variant": v.label, "model": v.model});
+            let on = v.model.as_ref().filter(|_| !single_model).map(|m| format!(" on {m}")).unwrap_or_default();
+            if let Some(recall) = v.recall.as_ref().filter(|x| !v.false_negatives.is_empty() || x.mean < 0.8) {
+                push(
+                    "trigger_misses",
+                    2,
+                    format!("Skill missed {} of {} should-fire prompt(s) in \"{}\"{on} (recall {:.0}%): {}. The description does not cover these; widen it.", v.false_negatives.len(), v.should_tasks, v.label, recall.mean * 100.0, if v.false_negatives.is_empty() { "it fired on each at least once but not reliably".to_string() } else { names(&v.false_negatives) }),
+                    target.clone(),
+                    "trigger_recall",
+                    json!({"recall": recall.mean, "ci_low": recall.ci_low, "ci_high": recall.ci_high, "missed_prompts": prompts(&v.false_negatives), "description": description, "should_tasks": v.should_tasks, "launch_id": launch_id}),
+                    if v.false_negatives.is_empty() { "medium" } else { "high" },
+                );
+            }
+            if let Some(precision) = v.precision.as_ref().filter(|_| !v.false_positives.is_empty()) {
+                let clause = culprit.as_ref().map(|(text, e)| format!(" The sentence most likely responsible: \"{}\" (removing it changes precision by {}).", crate::util::clip(text, 140), report::fmt_delta(&stats::metric_info("trigger_precision"), -e.effect))).unwrap_or_default();
+                push(
+                    "trigger_overfires",
+                    2,
+                    format!("Skill fired on {} of {} should-not prompt(s) in \"{}\"{on} (precision {:.0}%): {}. Narrow the description.{clause}", v.false_positives.len(), v.should_not_tasks, v.label, precision.mean * 100.0, names(&v.false_positives)),
+                    target,
+                    "trigger_precision",
+                    json!({"precision": precision.mean, "ci_low": precision.ci_low, "ci_high": precision.ci_high, "fired_prompts": prompts(&v.false_positives), "description": description, "should_not_tasks": v.should_not_tasks,
+                        "responsible_sentence": culprit.as_ref().map(|(text, e)| json!({"text": text, "precision_effect": e.effect, "ci_low": e.ci_low, "ci_high": e.ci_high})), "launch_id": launch_id}),
+                    "high",
+                );
+            }
+        }
+    }
+    // Outside a trigger experiment every task was written for the skill, so a silent skill is a miss.
+    for v in r.variants.iter().filter(|v| r.trigger.is_none() && v.metrics.contains_key("skill_invoked")) {
         let silent: Vec<&str> = r
             .tasks
             .iter()
@@ -155,18 +199,19 @@ pub fn build(store: &Store, launch_id: i64, metric: Option<&str>) -> Result<Vec<
             .map(|t| t.task_id.as_str())
             .collect();
         let rate = v.metrics["skill_invoked"].mean;
+        let prompts: Vec<Value> = silent.iter().map(|id| json!({"task": id, "prompt": launch.tasks.iter().find(|t| t.id == *id).map(|t| t.prompt.clone())})).collect();
         if !silent.is_empty() {
             push(
-                "fix_trigger",
+                "trigger_misses",
                 2,
                 format!("Skill never triggered on task{} {} in variant \"{}\" (invoked in {:.0}% of runs overall); the description may not match these prompts.", if silent.len() == 1 { "" } else { "s" }, silent.join(", "), v.label, rate * 100.0),
                 json!({"type": "variant", "variant": v.label, "tasks": silent}),
                 "skill_invoked",
-                json!({"invoked_rate": rate, "runs": v.metrics["skill_invoked"].n, "tasks_never_triggered": silent, "launch_id": launch_id}),
+                json!({"invoked_rate": rate, "runs": v.metrics["skill_invoked"].n, "tasks_never_triggered": silent, "missed_prompts": prompts, "description": describe(&v.key), "launch_id": launch_id}),
                 "high",
             );
         } else if rate < 0.5 && v.metrics["skill_invoked"].n >= 4 {
-            push("fix_trigger", 3, format!("Skill triggered in only {:.0}% of runs of variant \"{}\"; tighten its description.", rate * 100.0, v.label), json!({"type": "variant", "variant": v.label}), "skill_invoked", json!({"invoked_rate": rate, "runs": v.metrics["skill_invoked"].n, "launch_id": launch_id}), "medium");
+            push("trigger_misses", 3, format!("Skill triggered in only {:.0}% of runs of variant \"{}\"; tighten its description.", rate * 100.0, v.label), json!({"type": "variant", "variant": v.label}), "skill_invoked", json!({"invoked_rate": rate, "runs": v.metrics["skill_invoked"].n, "description": describe(&v.key), "launch_id": launch_id}), "medium");
         }
     }
 

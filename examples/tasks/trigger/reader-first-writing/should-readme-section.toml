@@ -1,0 +1,5 @@
+id = "rfw-should-readme-section"
+prompt = "I'm writing a README section that explains how to run the tests locally. Write it for someone new to the repo."
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

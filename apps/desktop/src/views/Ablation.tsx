@@ -15,6 +15,9 @@ export default function Ablation({ ctx }: { ctx: Ctx }) {
   if (r) remember(r.metrics);
   const ab = r?.ablation;
   const m = ab ? info(ab.metric) : null;
+  const bySentence = ab?.mode === "description_sentences";
+  const part = bySentence ? "sentence" : "section";
+  const Part = bySentence ? "Sentence" : "Section";
   return (
     <div className="content">
       <div className="page">
@@ -56,23 +59,40 @@ export default function Ablation({ ctx }: { ctx: Ctx }) {
                 )}
               </div>
             </Panel>
-            <Panel title="Section contributions" sub="Right of zero: the section helps. Left: the file scores better without it.">
+            <Panel title={`${Part} contributions`} sub={bySentence ? "Each sentence of the description is removed in turn, body intact. Right of zero: the sentence helps triggering. Left: the skill triggers better without it." : "Right of zero: the section helps. Left: the file scores better without it."}>
               <Forest
                 metric={m}
-                labelHead="Section"
+                labelHead={Part}
                 band={equivalenceBand(m, ab.full_effect?.treat_mean ?? 0)}
                 rows={ab.sections.map((s: any) => ({
                   key: String(s.index),
                   label: `${s.index + 1}. ${s.title}`,
-                  sub: `lines ${s.lines[0]}–${s.lines[1]}, about ${s.est_tokens} tokens`,
+                  sub: bySentence ? `about ${s.est_tokens} tokens` : `lines ${s.lines[0]}–${s.lines[1]}, about ${s.est_tokens} tokens`,
                   effect: s.effect,
                   word: WORD[s.attribution],
                 }))}
               />
             </Panel>
-            <Panel title="What each section costs" sub="Full file minus the file without the section, per run." flush>
+            {bySentence && (
+              <Panel title="Precision and recall by sentence" sub="Full description minus the description without the sentence. A sentence with negative precision makes the skill fire where it should not; one with positive recall is why it fires where it should." flush>
+                <table className="grid">
+                  <thead><tr><th>Sentence</th><th className="num">Precision</th><th className="num">Recall</th></tr></thead>
+                  <tbody>
+                    {ab.sections.map((s: any) => (
+                      <tr key={s.index}>
+                        <td>{s.index + 1}. {s.title}</td>
+                        {[["trigger_precision", s.precision_effect], ["trigger_recall", s.recall_effect]].map(([name, e]: any) => (
+                          <td key={name} className="num">{e ? <>{fmtDelta(info(name), e.effect)} <span className="faint small">[{fmtDelta(info(name), e.ci_low)}, {fmtDelta(info(name), e.ci_high)}]</span></> : "–"}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Panel>
+            )}
+            <Panel title={`What each ${part} costs`} sub={`Full file minus the file without the ${part}, per run.`} flush>
               <table className="grid">
-                <thead><tr><th>Section</th><th>Attribution</th><th className="num">Size</th><th className="num">Tokens per run</th><th className="num">Cost per run</th><th className="num">{m.label} without it</th></tr></thead>
+                <thead><tr><th>{Part}</th><th>Attribution</th><th className="num">Size</th><th className="num">Tokens per run</th><th className="num">Cost per run</th><th className="num">{m.label} without it</th></tr></thead>
                 <tbody>
                   {ab.sections.map((s: any) => (
                     <tr key={s.index}>

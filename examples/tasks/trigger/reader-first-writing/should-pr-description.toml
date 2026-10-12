@@ -1,0 +1,5 @@
+id = "rfw-should-pr-description"
+prompt = "Write the pull request text for a change that replaces the hand-rolled retry loop with the shared backoff helper and adds a test for the timeout case."
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

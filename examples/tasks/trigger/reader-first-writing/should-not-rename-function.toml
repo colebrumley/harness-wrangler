@@ -1,0 +1,5 @@
+id = "rfw-should-not-rename-function"
+prompt = "Rename the function send_emails to dispatch_notifications everywhere in this repo. Change nothing else."
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

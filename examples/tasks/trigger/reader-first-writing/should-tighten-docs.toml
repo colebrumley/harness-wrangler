@@ -1,0 +1,5 @@
+id = "rfw-should-tighten-docs"
+prompt = "Tighten this sentence from our documentation: 'In order to facilitate the utilization of the caching layer, it is necessary that the configuration be updated.'"
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

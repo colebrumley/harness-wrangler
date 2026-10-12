@@ -1,0 +1,5 @@
+id = "rfw-should-customer-email"
+prompt = "Write one of our standard emails to a customer who asked why their invoice shows two charges. The second is a pre-authorization that drops off within three days."
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

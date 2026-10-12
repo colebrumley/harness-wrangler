@@ -1,0 +1,5 @@
+id = "rfw-should-not-spell-check-list"
+prompt = "Run a spell checker over the Markdown files in docs/ and list the misspelled words. Do not fix anything."
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

@@ -1,0 +1,5 @@
+id = "rfw-should-not-cover-letter-length"
+prompt = "How many words are in a typical one-page cover letter? Just the number."
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

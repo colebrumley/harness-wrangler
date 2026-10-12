@@ -52,8 +52,12 @@ export interface Report {
   launch_id: number; experiment: string; description: string; status: string; phase: string; created_at: string; def_hash: string; runs_per_cell: number;
   counts: Counts; cost_usd: number; judge_cost_usd: number; primary_metric: string; metrics: MetricInfo[];
   factors: { name: string; kind: string; levels: string[] }[]; variants: VariantSummary[]; comparisons: Comparison[]; conditional: Conditional[];
-  tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; events: any; warnings: string[];
+  tasks: { task_id: string; tags: string[]; headroom: Headroom; headroom_by_metric: Record<string, Headroom>; cells: Cell[] }[]; flaky: any[]; flaky_note: string | null; pairwise: any | null; ablation: any | null; trigger: TriggerReport | null; events: any; warnings: string[];
 }
+export interface TriggerPrompt { task_id: string; prompt: string; fire_rate: number; runs: number }
+export interface TriggerRates { precision: Summary | null; recall: Summary | null; f1: Summary | null }
+export interface TriggerVariant extends TriggerRates { variant_key: string; label: string; model: string | null; should_tasks: number; should_not_tasks: number; false_negatives: TriggerPrompt[]; false_positives: TriggerPrompt[]; description: string | null }
+export interface TriggerReport { skills: string[]; variants: TriggerVariant[]; by_model: ({ model: string } & TriggerRates)[] }
 export interface LaunchSummary { id: number; experiment: string; status: string; phase: string; created_at: string; finished_at: string | null; suite: string | null; note: string; runs_total: number; runs_done: number; runs_failed: number; cost_usd: number }
 
 const KNOWN: Record<string, Partial<MetricInfo>> = {};
@@ -68,6 +72,8 @@ export function info(name: string): MetricInfo {
     wall_time_s: { name, label: "Wall time", direction: "lower", scale: "positive", unit: "s" },
     total_tokens: { name, label: "Total tokens", direction: "lower", scale: "positive", unit: "tok" },
   };
+  const trig: Record<string, string> = { trigger_precision: "Trigger precision", trigger_recall: "Trigger recall", trigger_f1: "Trigger F1", trigger_fired: "Skill fired" };
+  if (trig[name]) return { name, label: trig[name], direction: name === "trigger_fired" ? "none" : "higher", scale: "rate", unit: "" };
   if (name.startsWith("check.")) return { name, label: `Check: ${name.slice(6)}`, direction: "higher", scale: "rate", unit: "" };
   return fallback[name] ?? { name, label: name, direction: "none", scale: "positive", unit: "" };
 }

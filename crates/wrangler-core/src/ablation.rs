@@ -48,6 +48,99 @@ pub fn frontmatter_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// The frontmatter split around the description's text, so that
+/// `prefix + sentences.concat() + suffix` is the frontmatter byte for byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DescriptionParts {
+    pub prefix: String,
+    /// Each sentence with the whitespace that follows it.
+    pub sentences: Vec<String>,
+    pub suffix: String,
+}
+
+impl DescriptionParts {
+    pub fn text(&self) -> String {
+        self.sentences.concat().split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    /// The frontmatter with one sentence removed.
+    pub fn without(&self, index: usize) -> String {
+        let mut value: String = self.sentences.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, s)| s.as_str()).collect();
+        // Dropping the last sentence leaves the previous one's trailing space behind.
+        if index + 1 == self.sentences.len() {
+            value.truncate(value.trim_end().len());
+        }
+        format!("{}{value}{}", self.prefix, self.suffix)
+    }
+    pub fn rejoin(&self) -> String {
+        format!("{}{}{}", self.prefix, self.sentences.concat(), self.suffix)
+    }
+}
+
+/// Split text into sentences at `.`, `!` or `?` followed by whitespace. Each
+/// piece keeps its trailing whitespace, so the pieces concatenate back.
+pub fn split_sentences(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') && chars.peek().map(|n| n.is_whitespace()).unwrap_or(false) {
+            while let Some(n) = chars.peek().copied().filter(|n| n.is_whitespace()) {
+                cur.push(n);
+                chars.next();
+            }
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Locate the `description:` value in a frontmatter block (with its `---`
+/// fences) and split it into sentences. Handles a plain or quoted value on
+/// one line, a plain value continued on indented lines, and `>` / `|` blocks.
+pub fn description_parts(frontmatter: &str) -> Option<DescriptionParts> {
+    let mut offset = 0;
+    let lines: Vec<&str> = frontmatter.split_inclusive('\n').collect();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(rest) = line.strip_prefix("description:") else {
+            offset += line.len();
+            continue;
+        };
+        let lead = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let value_at = offset + "description:".len() + lead;
+        let value = rest[lead..].trim_end_matches(['\n', '\r']);
+        // Lines that continue the value: indented or blank, up to the next key or fence.
+        let mut block_end = offset + line.len();
+        for l in &lines[i + 1..] {
+            if l.starts_with([' ', '\t']) || l.trim().is_empty() {
+                block_end += l.len();
+            } else {
+                break;
+            }
+        }
+        let (start, end) = if let Some(q) = value.chars().next().filter(|c| *c == '"' || *c == '\'') {
+            let close = value[1..].rfind(q)?;
+            (value_at + 1, value_at + 1 + close)
+        } else if value.starts_with('>') || value.starts_with('|') {
+            (offset + line.len(), block_end)
+        } else {
+            (value_at, block_end)
+        };
+        // Trailing whitespace (the final newline) belongs to the suffix.
+        let raw = &frontmatter[start..end];
+        let end = start + raw.trim_end().len();
+        let sentences = split_sentences(&frontmatter[start..end]);
+        if sentences.is_empty() {
+            return None;
+        }
+        return Some(DescriptionParts { prefix: frontmatter[..start].to_string(), sentences, suffix: frontmatter[end..].to_string() });
+    }
+    None
+}
+
 fn heading(line: &str) -> Option<(u32, String)> {
     let hashes = line.chars().take_while(|c| *c == '#').count();
     if hashes == 0 || hashes > 6 {
@@ -137,6 +230,10 @@ pub struct AblationRequest {
     /// Also generate the frontmatter-only variant (skills only).
     #[serde(default)]
     pub description_only: bool,
+    /// Ablate the frontmatter description one sentence at a time, body
+    /// intact, instead of the body's sections (skills only).
+    #[serde(default)]
+    pub description_sentences: bool,
     /// Task globs for the generated experiment.
     #[serde(default)]
     pub tasks: Vec<String>,
@@ -167,22 +264,24 @@ pub struct AblationPlan {
     pub skipped_sections: Vec<String>,
 }
 
-struct Source {
+pub(crate) struct Source {
     /// The Markdown file being ablated.
-    file: PathBuf,
-    kind: &'static str,
+    pub(crate) file: PathBuf,
+    pub(crate) kind: &'static str,
     /// Skill directory (skills) whose other files ride along in every variant.
     skill_dir: Option<PathBuf>,
     name: String,
+    /// The skill's own name as the harness reports it (frontmatter `name`).
+    pub(crate) display_name: String,
 }
 
-fn resolve_source(project: &Project, source: &str) -> Result<Source> {
+pub(crate) fn resolve_source(project: &Project, source: &str) -> Result<Source> {
     let p = project.abs(source);
     let skill = |dir: &Path| -> Result<Source> {
         let file = dir.join("SKILL.md");
         let text = std::fs::read_to_string(&file)?;
         let name = frontmatter_field(&text, "name").unwrap_or_else(|| dir.file_name().unwrap().to_string_lossy().to_string());
-        Ok(Source { file, kind: "skill", skill_dir: Some(dir.to_path_buf()), name: slug(&name) })
+        Ok(Source { file, kind: "skill", skill_dir: Some(dir.to_path_buf()), name: slug(&name), display_name: name })
     };
     if p.is_file() {
         let fname = p.file_name().unwrap().to_string_lossy().to_string();
@@ -190,7 +289,7 @@ fn resolve_source(project: &Project, source: &str) -> Result<Source> {
             return skill(p.parent().unwrap());
         }
         let parent = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        return Ok(Source { file: p.clone(), kind: "claude_md", skill_dir: None, name: slug(&format!("{parent}-claude-md")) });
+        return Ok(Source { file: p.clone(), kind: "claude_md", skill_dir: None, name: slug(&format!("{parent}-claude-md")), display_name: String::new() });
     }
     if !p.is_dir() {
         bail!("ablation source `{source}` not found");
@@ -208,6 +307,7 @@ fn resolve_source(project: &Project, source: &str) -> Result<Source> {
             kind: "claude_md",
             skill_dir: None,
             name: slug(&format!("{}-claude-md", p.file_name().unwrap().to_string_lossy())),
+            display_name: String::new(),
         }),
         (0, false) => bail!("`{source}` holds no SKILL.md or CLAUDE.md"),
         _ => bail!("`{source}` holds more than one skill or instruction file; point at the one to ablate"),
@@ -238,12 +338,42 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
     let src = resolve_source(project, &req.source)?;
     let text = std::fs::read_to_string(&src.file).with_context(|| format!("reading {}", src.file.display()))?;
     let depth = req.depth.unwrap_or(2).clamp(1, 6);
-    let sections = split_sections(&text, depth);
+    let by_sentence = req.description_sentences;
+    let (fm_lines, fm, body) = split_frontmatter(&text);
+    let description = if by_sentence {
+        if src.kind != "skill" {
+            bail!("--description-sentences applies to skills (a CLAUDE.md has no frontmatter description)");
+        }
+        let parts = description_parts(fm).context("skill has no frontmatter description to split")?;
+        if parts.sentences.len() < 2 {
+            bail!("the description is one sentence; there is nothing to ablate");
+        }
+        Some(parts)
+    } else {
+        None
+    };
+    // In sentence mode each "section" is one sentence of the description.
+    let sections: Vec<Section> = match &description {
+        Some(parts) => {
+            let mut line = parts.prefix.matches('\n').count() + 1;
+            parts
+                .sentences
+                .iter()
+                .enumerate()
+                .map(|(i, sentence)| {
+                    let start = line;
+                    line += sentence.matches('\n').count();
+                    Section { index: i, title: sentence.split_whitespace().collect::<Vec<_>>().join(" "), level: 0, start_line: start, end_line: line.min(fm_lines.max(start)), est_tokens: est_tokens(sentence), has_body: true }
+                })
+                .collect()
+        }
+        None => split_sections(&text, depth),
+    };
     let ablatable: Vec<&Section> = sections.iter().filter(|s| s.has_body).collect();
     if ablatable.len() < 2 {
         bail!("found {} section(s) with content at heading depth {depth}; nothing to ablate (try a deeper --depth)", ablatable.len());
     }
-    let exp_name = req.name.clone().unwrap_or_else(|| format!("{}-ablation", src.name));
+    let exp_name = req.name.clone().unwrap_or_else(|| format!("{}-{}", src.name, if by_sentence { "description-ablation" } else { "ablation" }));
     if exp_name.contains('/') {
         bail!("invalid experiment name `{exp_name}`");
     }
@@ -260,9 +390,14 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
 
     let mut meta_sections = vec![];
     for s in &ablatable {
-        let dir = format!("without-{:02}-{}", s.index + 1, slug(&s.title));
+        let dir = format!("without-{}{:02}-{}", if by_sentence { "sentence-" } else { "" }, s.index + 1, slug(&s.title));
         let rel = format!("{base_rel}/{dir}");
-        write_variant(&src, &base.join(&dir), Some(&without_section(&text, s)))?;
+        let content = match &description {
+            // The body is appended untouched: only the description changes.
+            Some(parts) => format!("{}{body}", parts.without(s.index)),
+            None => without_section(&text, s),
+        };
+        write_variant(&src, &base.join(&dir), Some(&content))?;
         overlays.push(rel.clone());
         levels.push(Level::Detailed { value: rel.clone(), label: Some(format!("−{}", short_title(&s.title))), extra: Default::default() });
         meta_sections.push(AblationSection { index: s.index, title: s.title.clone(), overlay: rel, est_tokens: s.est_tokens, lines: (s.start_line, s.end_line) });
@@ -294,19 +429,24 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
             },
         );
     }
+    // A description ablation is a trigger experiment: it runs the skill's
+    // trigger corpus when there is one, and attributes precision and recall.
+    let trigger_glob = format!("tasks/trigger/{}/*.toml", src.name);
+    let has_corpus = by_sentence && !crate::project::glob_sorted(&project.root, &trigger_glob).is_empty();
+    let default_tasks = if has_corpus { trigger_glob } else { "tasks/**/*.toml".to_string() };
     let exp = Experiment {
         name: exp_name.clone(),
-        description: format!("Section ablation of {} (split at heading depth {depth})", project.rel(&src.file)),
+        description: if by_sentence { format!("Description ablation of {} (one sentence removed per variant, body intact)", project.rel(&src.file)) } else { format!("Section ablation of {} (split at heading depth {depth})", project.rel(&src.file)) },
         runs_per_cell: req.runs_per_cell.unwrap_or(DEFAULT_RUNS_PER_CELL),
         timeout_secs: DEFAULT_TIMEOUT_SECS,
         isolation: Isolation::Workspace,
         network: NetworkPolicy::Full,
-        primary_metric: req.primary_metric.clone(),
+        primary_metric: req.primary_metric.clone().or_else(|| by_sentence.then(|| "trigger_f1".to_string())),
         budget_usd: None,
         keep_workspaces: false,
         runner: RunnerCfg { kind: req.runner.clone().unwrap_or_else(|| "claude-code".into()), model: req.model.clone(), effort: req.effort.clone(), ..Default::default() },
         factors: vec![Factor { name: "overlay".into(), kind: FactorKind::Overlay, levels, flag: None, env: None }],
-        tasks: TaskSel { include: if req.tasks.is_empty() { vec!["tasks/**/*.toml".into()] } else { req.tasks.clone() }, exclude: vec![] },
+        tasks: TaskSel { include: if req.tasks.is_empty() { vec![default_tasks] } else { req.tasks.clone() }, exclude: vec![] },
         graders,
         ablation: Some(AblationMeta {
             source: project.rel(&src.file),
@@ -316,8 +456,10 @@ pub fn generate(project: &Project, req: &AblationRequest) -> Result<AblationPlan
             baseline: "overlays/none".into(),
             full: full_rel,
             description_only,
+            mode: by_sentence.then(|| "description_sentences".to_string()),
             sections: meta_sections,
         }),
+        trigger: by_sentence.then(|| TriggerCfg { skill: Some(src.display_name.clone()), skills: vec![] }),
     };
     let toml_text = exp.to_toml()?;
     project.save_experiment_toml(&exp_name, &toml_text)?;
@@ -359,6 +501,57 @@ mod tests {
         assert_eq!(split_sections(SKILL, 3).len(), 5);
         assert_eq!(split_sections("plain intro\n\n# H\nx\n", 1)[0].title, "(intro)");
         assert_eq!(frontmatter_field(SKILL, "name").as_deref(), Some("demo-skill"));
+    }
+
+    #[test]
+    fn description_sentences_round_trip() {
+        let plain = "---\nname: s\ndescription: Use when writing. Also for emails! Not for code? Keeps meaning fixed.\nlicense: MIT\n---\n";
+        let quoted = "---\ndescription: \"Use when writing. Makes it short.\"\nname: s\n---\n";
+        let folded = "---\nname: s\ndescription: >\n  Use when writing or revising.\n  Makes the writing short. Keeps\n  the meaning fixed.\n---\n";
+        let wrapped = "---\ndescription: Use when writing.\n  Second sentence here.\nname: s\n---\n";
+        for fm in [plain, quoted, folded, wrapped] {
+            let parts = description_parts(fm).unwrap();
+            assert_eq!(parts.rejoin(), fm, "sentence split must round-trip the frontmatter");
+            assert!(parts.sentences.len() >= 2, "{parts:?}");
+        }
+        let p = description_parts(plain).unwrap();
+        assert_eq!(p.sentences, vec!["Use when writing. ", "Also for emails! ", "Not for code? ", "Keeps meaning fixed."]);
+        assert_eq!(p.without(1), "---\nname: s\ndescription: Use when writing. Not for code? Keeps meaning fixed.\nlicense: MIT\n---\n");
+        assert_eq!(p.without(3), "---\nname: s\ndescription: Use when writing. Also for emails! Not for code?\nlicense: MIT\n---\n");
+        assert_eq!(description_parts(quoted).unwrap().without(0), "---\ndescription: \"Makes it short.\"\nname: s\n---\n");
+        assert_eq!(description_parts(folded).unwrap().text(), "Use when writing or revising. Makes the writing short. Keeps the meaning fixed.");
+        assert!(description_parts("---\nname: s\n---\n").is_none());
+    }
+
+    #[test]
+    fn description_ablation_leaves_the_body_byte_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = Project::init(tmp.path()).unwrap();
+        let skill = "---\nname: demo-skill\ndescription: Use when writing summaries. Also for emails. Never for code.\n---\n# Demo\n\nBody line.  \n\n## One\n\ttabbed\n";
+        let dir = tmp.path().join("overlays/demo/.claude/skills/demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), skill).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks/trigger/demo-skill")).unwrap();
+        std::fs::write(tmp.path().join("tasks/trigger/demo-skill/a.toml"), "id='a'\nprompt='Write a summary'\ntrigger='should'\n").unwrap();
+        let plan = generate(&project, &AblationRequest { source: "overlays/demo".into(), description_sentences: true, ..Default::default() }).unwrap();
+        assert_eq!(plan.experiment, "demo-skill-description-ablation");
+        assert_eq!(plan.sections.len(), 3);
+        let exp = project.load_experiment(&plan.experiment).unwrap();
+        let meta = exp.ablation.clone().unwrap();
+        assert!(meta.by_sentence());
+        assert_eq!(exp.trigger.as_ref().unwrap().names(), vec!["demo-skill"]);
+        assert_eq!(exp.primary_metric.as_deref(), Some("trigger_f1"));
+        assert_eq!(exp.tasks.include, vec!["tasks/trigger/demo-skill/*.toml"]);
+        let (_, _, body) = split_frontmatter(skill);
+        for (i, s) in meta.sections.iter().enumerate() {
+            let text = std::fs::read_to_string(project.abs(&s.overlay).join(".claude/skills/demo/SKILL.md")).unwrap();
+            let (_, fm, b) = split_frontmatter(&text);
+            assert_eq!(b, body, "body must be byte-identical");
+            assert_eq!(description_parts(fm).unwrap().sentences.len(), 2, "variant {i} drops exactly one sentence");
+            assert!(fm.contains("name: demo-skill"));
+        }
+        assert_eq!(meta.sections[1].title, "Also for emails.");
+        project.validate(&exp).unwrap();
     }
 
     #[test]

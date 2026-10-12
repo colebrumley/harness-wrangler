@@ -5,6 +5,10 @@
 //! Directives read from `CLAUDE.md` and `.claude/skills/*/SKILL.md`:
 //! - `mock-effect: 0.2` adds to quality (may be negative).
 //! - `mock-trigger: never` makes the skill go uninvoked.
+//!
+//! On a trigger task (`trigger = "should" | "should_not"`) a skill fires
+//! only when the prompt contains a word from its description, so trigger
+//! experiments have precision and recall worth looking at.
 
 use super::*;
 use crate::transcript::{ToolCall, ToolResult, Turn};
@@ -12,6 +16,17 @@ use crate::util::{hash_u64, Rng};
 use serde_json::json;
 
 pub struct MockRunner;
+
+/// Words of a description that count as trigger words: six letters or more.
+pub fn trigger_words(description: &str) -> Vec<String> {
+    description.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 6).map(|w| w.to_lowercase()).collect()
+}
+
+/// The mock trigger rule: does the prompt contain a word from the description?
+pub fn mock_fires(description: &str, prompt: &str) -> bool {
+    let p = prompt.to_lowercase();
+    trigger_words(description).iter().any(|w| p.contains(w.as_str()))
+}
 
 fn directive(text: &str, key: &str) -> Vec<String> {
     text.lines().filter_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string())).collect()
@@ -71,9 +86,11 @@ impl AgentRunner for MockRunner {
             overlay_chars += text.len();
             let never = directive(text, "mock-trigger:").iter().any(|v| v == "never");
             if let Some(name) = skill {
-                if never {
+                let description = crate::ablation::description_parts(crate::ablation::split_frontmatter(text).1).map(|p| p.text()).unwrap_or_default();
+                if never || (task.trigger.is_some() && !mock_fires(&description, &task.prompt)) {
                     continue;
                 }
+                let name = &crate::ablation::frontmatter_field(text, "name").unwrap_or_else(|| name.clone());
                 let id = format!("call_{name}");
                 turns.push(Turn {
                     role: "assistant".into(),

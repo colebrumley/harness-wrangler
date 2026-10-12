@@ -5,7 +5,7 @@ import { useLoad } from "../hooks";
 
 const KIND: Record<string, string> = {
   remove_section: "Remove section", review_section: "Review section", keep_section: "Keep section", retire_pattern: "Retire", drop_pattern: "Drop",
-  keep_pattern: "Keep", fix_trigger: "Fix triggering", trim_body: "Trim", change_level: "Change setting", tradeoff: "Trade-off", flaky_task: "Flaky task",
+  keep_pattern: "Keep", no_headroom: "No headroom", trigger_misses: "Skill misses", trigger_overfires: "Skill overfires", placebo_explains: "Placebo explains it", calibrate_judge: "Calibrate the judge", trim_body: "Trim", change_level: "Change setting", tradeoff: "Trade-off", flaky_task: "Flaky task",
   more_runs: "Needs more runs", judge_bias: "Judge reliability", reviewer_flag: "Reviewers flagged", failures: "Failures",
 };
 

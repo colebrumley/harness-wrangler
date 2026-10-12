@@ -78,7 +78,8 @@ Run commands inside a project folder, or pass `-C <dir>`. Every command takes `-
 | `wrangler status <launch>` | Per-cell progress and cost. |
 | `wrangler report <launch\|experiment> [--metric m]` | Variants, factor effects with 95% CIs, per-task table, pairwise, ablation. |
 | `wrangler runs <launch>` / `wrangler show <run> [--output\|--diff\|--transcript]` | Drill into runs. |
-| `wrangler ablate <skill-or-CLAUDE.md> [--description-only] [--depth N]` | Generate leave-one-section-out overlays and their experiment. |
+| `wrangler ablate <skill-or-CLAUDE.md> [--description-only] [--depth N]` | Generate leave-one-section-out overlays and their experiment. `--description-sentences` ablates the description one sentence at a time instead, for trigger experiments. |
+| `wrangler trigger-set <skill> [--n 20] [--model m]` | Draft should-fire and near-miss should-not prompts from a skill's description, as draft tasks to review. |
 | `wrangler suite create\|run\|status\|diff` | Tracked suites, per-model baselines, new-model diff. |
 | `wrangler advice <launch\|experiment>` | Suggestions with evidence. `--json` is the export for agents. |
 | `wrangler annotations <launch>` | Human review comments and reactions, grouped by variant. |

@@ -210,7 +210,16 @@ impl Api {
                 std::fs::remove_file(p.experiment_path(&name))?;
                 json!({"ok": true})
             }
-            "experiment_template" => json!({"toml": EXPERIMENT_TEMPLATE}),
+            "experiment_template" => match opt::<String>(args, "kind")?.as_deref() {
+                // A trigger experiment: one overlay level, two turns, no judge.
+                Some("trigger") => {
+                    let skill: String = opt(args, "skill")?.unwrap_or_else(|| "my-skill".into());
+                    let overlay: String = opt(args, "overlay")?.unwrap_or_else(|| format!("overlays/{skill}"));
+                    json!({"toml": crate::trigger::experiment_template(&skill, &overlay, &format!("tasks/trigger/{}", crate::util::slug(&skill)))})
+                }
+                _ => json!({"toml": EXPERIMENT_TEMPLATE}),
+            },
+            "trigger_set" => json!(crate::trigger::generate(p, &arg::<String>(args, "skill")?, opt::<usize>(args, "n")?.unwrap_or(10).clamp(1, 100), &opt::<String>(args, "model")?.unwrap_or_else(|| "claude-sonnet-5-5".into()), &Arc::new(AtomicBool::new(false)))?),
             "tasks_list" => {
                 let list: Vec<Value> = p
                     .list_all_tasks()

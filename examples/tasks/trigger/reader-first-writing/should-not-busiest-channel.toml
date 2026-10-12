@@ -1,0 +1,5 @@
+id = "rfw-should-not-busiest-channel"
+prompt = "Which of our Slack channels gets the most messages per day? The counts are in stats.json; give me the channel name and the number."
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

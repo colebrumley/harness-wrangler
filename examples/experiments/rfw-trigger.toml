@@ -1,0 +1,30 @@
+name = "rfw-trigger"
+description = "Does reader-first-writing fire on writing requests and stay quiet on near misses? Two turns per run, no judge."
+runs_per_cell = 3
+timeout_secs = 300
+isolation = "workspace"
+primary_metric = "trigger_f1"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+max_turns = 2
+
+# Every task under tasks/trigger/ carries trigger = "should" or "should_not".
+# This turns each into a skill_invoked check for the named skill.
+[trigger]
+skill = "reader-first-writing"
+
+# One overlay level: a baseline without the skill can never fire.
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/rfw-v1.1.0"]
+
+[[factors]]
+name = "model"
+kind = "model"
+levels = ["claude-haiku-5-5", "claude-sonnet-5-5"]
+
+[tasks]
+include = ["tasks/trigger/reader-first-writing/*.toml"]

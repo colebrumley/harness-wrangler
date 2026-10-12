@@ -1,0 +1,5 @@
+id = "rfw-should-not-literal-translation"
+prompt = "Translate this sentence into French, word for word: 'The server is down.'"
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

@@ -48,7 +48,7 @@ impl ClaudeCodeRunner {
         for p in &limits.cfg.plugin_dirs {
             a.extend(["--plugin-dir".into(), ws.project.abs(p).to_string_lossy().to_string()]);
         }
-        if let Some(n) = limits.cfg.max_turns {
+        if let Some(n) = task.max_turns.or(limits.cfg.max_turns) {
             a.extend(["--max-turns".into(), n.to_string()]);
         }
         for k in variant.knobs() {

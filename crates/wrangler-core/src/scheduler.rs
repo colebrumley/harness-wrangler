@@ -52,7 +52,12 @@ pub type EventSink<'a> = &'a (dyn Fn(Event) + Sync);
 pub fn create_launch(project: &Project, store: &Store, exp: &Experiment, suite: Option<&str>, note: &str) -> Result<(i64, Vec<String>)> {
     let warnings = project.validate(exp)?;
     let tasks = project.load_tasks(exp)?;
-    let variants = exp.variants();
+    let mut variants = exp.variants();
+    // Freeze each variant's skill descriptions with the launch, so advice
+    // about triggering quotes the text that was actually tested.
+    for v in variants.iter_mut() {
+        v.skills = v.overlays().iter().flat_map(|o| project.overlay_skills(o)).collect();
+    }
     let id = store.create_launch(exp, &tasks, &variants, suite, note)?;
     Ok((id, warnings))
 }
@@ -289,7 +294,13 @@ fn execute_run(
             "timeout"
         } else if let Some(limit) = &rec.limit_hit {
             events.push(RunEvent { kind: "limit".into(), at_ms: rec.wall_ms, detail: limit.clone(), ..Default::default() });
-            "timeout"
+            // A cap the task set for itself (a trigger prompt stops after two
+            // turns) is how the task is meant to end.
+            if task.max_turns.is_some() {
+                "done"
+            } else {
+                "timeout"
+            }
         } else if rec.error.is_some() {
             "failed"
         } else {
@@ -312,6 +323,11 @@ fn execute_run(
         if !overlay_skills.is_empty() {
             let hit = skills.iter().any(|s| skill_names.contains(s));
             m.insert("skill_invoked".into(), if hit { 1.0 } else { 0.0 });
+        }
+        // Trigger tasks: did any of the experiment's skills fire, installed or not.
+        if let (Some(trigger), Some(_)) = (&exp.trigger, task.should_trigger()) {
+            let names = trigger.names();
+            m.insert("trigger_fired".into(), if skills.iter().any(|s| names.contains(s)) { 1.0 } else { 0.0 });
         }
 
         std::fs::write(run_dir.join("transcript.json"), serde_json::to_string(&rec.transcript)?)?;

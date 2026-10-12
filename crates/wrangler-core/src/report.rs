@@ -2,7 +2,7 @@
 //! from the store on demand.
 
 use crate::model::*;
-use crate::stats::{self, Bout, BtItem, Contrast, Direction, Effect, Headroom, MetricInfo, Summary, Verdict};
+use crate::stats::{self, Bout, BtItem, Contrast, Direction, Effect, Headroom, MetricInfo, Summary, TriggerTask, Verdict};
 use crate::store::{Judgment, Launch, RunRow, Store};
 use crate::util::hash_u64;
 use anyhow::Result;
@@ -178,12 +178,22 @@ pub struct SectionAttribution {
     /// full − without-this-section on cost and tokens: what the section costs per run.
     pub cost_effect: Option<Effect>,
     pub tokens_effect: Option<Effect>,
+    /// Description ablations only: full − without-this-sentence on trigger
+    /// precision and recall. A negative precision effect means the sentence
+    /// makes the skill fire where it should not.
+    #[serde(default)]
+    pub precision_effect: Option<Effect>,
+    #[serde(default)]
+    pub recall_effect: Option<Effect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AblationReport {
     pub source: String,
     pub kind: String,
+    /// `sections` or `description_sentences`.
+    #[serde(default)]
+    pub mode: String,
     pub metric: String,
     /// full − none.
     pub full_effect: Option<Effect>,
@@ -193,6 +203,53 @@ pub struct AblationReport {
     pub body_effect: Option<Effect>,
     pub skill_invoked_rate: Option<f64>,
     pub sections: Vec<SectionAttribution>,
+}
+
+/// A trigger prompt that went the wrong way in one variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerPrompt {
+    pub task_id: String,
+    pub prompt: String,
+    /// Share of runs in which the skill fired.
+    pub fire_rate: f64,
+    pub runs: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerVariant {
+    pub variant_key: String,
+    pub label: String,
+    pub model: Option<String>,
+    /// Undefined (`None`) when the skill never fired in this variant.
+    pub precision: Option<Summary>,
+    pub recall: Option<Summary>,
+    pub f1: Option<Summary>,
+    pub should_tasks: usize,
+    pub should_not_tasks: usize,
+    /// Should-fire prompts on which the skill never fired.
+    pub false_negatives: Vec<TriggerPrompt>,
+    /// Should-not prompts on which it fired at least once.
+    pub false_positives: Vec<TriggerPrompt>,
+    /// The skill's description as it was when the launch was created.
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerModel {
+    pub model: String,
+    pub precision: Option<Summary>,
+    pub recall: Option<Summary>,
+    pub f1: Option<Summary>,
+}
+
+/// Triggering as a classifier: does the skill fire on the prompts it should
+/// and stay quiet on the near misses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerReport {
+    pub skills: Vec<String>,
+    pub variants: Vec<TriggerVariant>,
+    /// Variants that install the skill, pooled by model. Empty without a model factor.
+    pub by_model: Vec<TriggerModel>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +285,7 @@ pub struct Report {
     pub flaky_note: Option<String>,
     pub pairwise: Option<Pairwise>,
     pub ablation: Option<AblationReport>,
+    pub trigger: Option<TriggerReport>,
     pub events: EventCounts,
     pub warnings: Vec<String>,
 }
@@ -267,9 +325,32 @@ impl Data {
         self.launch.variants.iter().find(|v| v.key == key)
     }
 
+    /// Fire records of the trigger tasks among the runs matching `pred`,
+    /// one per pairing unit.
+    pub fn trigger_tasks(&self, pred: &dyn Fn(&RunRow) -> bool, unit: &dyn Fn(&RunRow) -> String) -> BTreeMap<String, TriggerTask> {
+        let mut out: BTreeMap<String, TriggerTask> = BTreeMap::new();
+        for r in self.runs.iter().filter(|r| pred(r)) {
+            let Some(should) = self.launch.tasks.iter().find(|t| t.id == r.task_id).and_then(|t| t.should_trigger()) else { continue };
+            let Some(fired) = self.metrics.get(&r.id).and_then(|m| m.get("trigger_fired")).copied() else { continue };
+            out.entry(unit(r)).or_insert_with(|| TriggerTask { should, fired: vec![] }).fired.push(fired);
+        }
+        out
+    }
+
+    fn trigger_summary(&self, metric: &str, pred: &dyn Fn(&RunRow) -> bool, seed: u64) -> Option<Summary> {
+        let tasks: Vec<TriggerTask> = self.trigger_tasks(pred, &|r| r.task_id.clone()).into_values().collect();
+        stats::trigger_summary(&tasks, metric, seed)
+    }
+
     pub fn available_metrics(&self) -> Vec<String> {
         let present: BTreeSet<&str> = self.metrics.values().flat_map(|m| m.keys().map(|k| k.as_str())).collect();
         let mut out: Vec<String> = stats::HEADLINE.iter().filter(|m| present.contains(**m)).map(|s| s.to_string()).collect();
+        if present.contains("trigger_fired") {
+            let at = out.iter().position(|m| m == "trigger_fired").unwrap_or(0);
+            for (i, m) in stats::TRIGGER_METRICS.iter().enumerate() {
+                out.insert(at + i, m.to_string());
+            }
+        }
         // Per-check pass rates, when a task has more than one check to tell apart.
         let checks: Vec<&str> = present.iter().copied().filter(|m| m.starts_with("check.")).collect();
         if checks.len() > 1 {
@@ -286,6 +367,9 @@ impl Data {
             return m.clone();
         }
         let avail = self.available_metrics();
+        if self.launch.def.trigger.is_some() && avail.iter().any(|a| a == "trigger_f1") {
+            return "trigger_f1".into();
+        }
         for m in ["judge_score", "pass", "expectations_passed", "checks_passed"] {
             if avail.iter().any(|a| a == m) {
                 return m.to_string();
@@ -298,6 +382,13 @@ impl Data {
     /// `control`, pairing on the unit key (task, plus whatever else the
     /// caller holds fixed).
     pub fn effect(&self, metric: &str, control: &dyn Fn(&RunRow) -> bool, treat: &dyn Fn(&RunRow) -> bool, unit: &dyn Fn(&RunRow) -> String) -> Option<Effect> {
+        // Precision, recall and F1 are properties of a set of tasks, not of
+        // a run: both arms are scored on the same resampled tasks.
+        if stats::TRIGGER_METRICS.contains(&metric) {
+            let (mut a, b) = (self.trigger_tasks(control, unit), self.trigger_tasks(treat, unit));
+            let units: Vec<(TriggerTask, TriggerTask)> = b.into_iter().filter_map(|(k, tb)| Some((a.remove(&k)?, tb))).collect();
+            return stats::trigger_effect(&units, metric, hash_u64(&format!("{}|{metric}", self.launch.id)));
+        }
         let units = self.units(metric, control, treat, unit);
         stats::paired_effect(&units, &stats::metric_info(metric), hash_u64(&format!("{}|{metric}", self.launch.id)))
     }
@@ -358,7 +449,13 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
     let all: Vec<&RunRow> = data.runs.iter().collect();
 
     let summaries = |pred: &dyn Fn(&RunRow) -> bool, tag: &str| -> BTreeMap<String, Summary> {
-        metric_names.iter().filter_map(|m| stats::summarize(&data.values(m, pred), seed(&format!("{tag}|{m}"))).map(|s| (m.clone(), s))).collect()
+        metric_names
+            .iter()
+            .filter_map(|m| {
+                let s = if stats::TRIGGER_METRICS.contains(&m.as_str()) { data.trigger_summary(m, pred, seed(&format!("{tag}|{m}"))) } else { stats::summarize(&data.values(m, pred), seed(&format!("{tag}|{m}"))) };
+                s.map(|s| (m.clone(), s))
+            })
+            .collect()
     };
 
     let variants: Vec<VariantSummary> = launch
@@ -503,6 +600,7 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         }
     }
     let ablation = exp.ablation.as_ref().map(|meta| build_ablation(&data, meta, &primary));
+    let trigger = build_trigger(&data, launch_id);
     let sum = |name: &str| data.metrics.values().filter_map(|m| m.get(name)).sum::<f64>() + 0.0;
 
     Ok(Report {
@@ -528,9 +626,72 @@ pub fn build(store: &Store, launch_id: i64, metric_override: Option<&str>) -> Re
         flaky_note,
         pairwise,
         ablation,
+        trigger,
         events,
         warnings,
     })
+}
+
+fn build_trigger(data: &Data, launch_id: i64) -> Option<TriggerReport> {
+    let launch = &data.launch;
+    let skills = launch.def.trigger.as_ref()?.names();
+    if !data.metrics.values().any(|m| m.contains_key("trigger_fired")) {
+        return None;
+    }
+    let prompt_of = |id: &str| launch.tasks.iter().find(|t| t.id == id).map(|t| t.prompt.clone()).unwrap_or_default();
+    let stat = |m: &str, pred: &dyn Fn(&RunRow) -> bool, tag: &str| data.trigger_summary(m, pred, hash_u64(&format!("{launch_id}|trigger|{tag}|{m}")));
+    let installs = |v: &Variant| v.skills.iter().any(|s| skills.contains(&s.name) || skills.contains(&s.dir));
+    let variants: Vec<TriggerVariant> = launch
+        .variants
+        .iter()
+        .map(|v| {
+            let mine = |r: &RunRow| r.variant_key == v.key;
+            let tasks = data.trigger_tasks(&mine, &|r| r.task_id.clone());
+            let wrong = |should: bool| -> Vec<TriggerPrompt> {
+                tasks
+                    .iter()
+                    .filter(|(_, t)| t.should == should && !t.fired.is_empty())
+                    .map(|(id, t)| (id, stats::mean(&t.fired), t.fired.len()))
+                    .filter(|(_, rate, _)| if should { *rate == 0.0 } else { *rate > 0.0 })
+                    .map(|(id, rate, runs)| TriggerPrompt { task_id: id.clone(), prompt: prompt_of(id), fire_rate: rate, runs })
+                    .collect()
+            };
+            TriggerVariant {
+                variant_key: v.key.clone(),
+                label: v.label.clone(),
+                model: v.model.clone(),
+                precision: stat("trigger_precision", &mine, &v.key),
+                recall: stat("trigger_recall", &mine, &v.key),
+                f1: stat("trigger_f1", &mine, &v.key),
+                should_tasks: tasks.values().filter(|t| t.should).count(),
+                should_not_tasks: tasks.values().filter(|t| !t.should).count(),
+                false_negatives: wrong(true),
+                false_positives: wrong(false),
+                description: v.skills.iter().find(|s| skills.contains(&s.name) || skills.contains(&s.dir)).map(|s| s.description.clone()),
+            }
+        })
+        .collect();
+    let mut by_model = vec![];
+    if launch.def.factors.iter().any(|f| f.kind == FactorKind::Model) {
+        // Pool the variants that install the skill; one with no skill cannot fire and would only dilute recall.
+        let any_installed = launch.variants.iter().any(installs);
+        let mut models: Vec<String> = vec![];
+        for v in &launch.variants {
+            if let Some(m) = &v.model {
+                if !models.contains(m) {
+                    models.push(m.clone());
+                }
+            }
+        }
+        for model in models {
+            let keys: Vec<&str> = launch.variants.iter().filter(|v| v.model.as_deref() == Some(model.as_str()) && (!any_installed || installs(v))).map(|v| v.key.as_str()).collect();
+            let pred = |r: &RunRow| keys.contains(&r.variant_key.as_str());
+            let pooled: Vec<TriggerTask> = data.trigger_tasks(&pred, &|r| format!("{}#{}", r.task_id, r.variant_key)).into_values().collect();
+            let s = |m: &str| stats::trigger_summary(&pooled, m, hash_u64(&format!("{launch_id}|trigger-model|{model}|{m}")));
+            by_model.push(TriggerModel { precision: s("trigger_precision"), recall: s("trigger_recall"), f1: s("trigger_f1"), model });
+        }
+    }
+    Some(TriggerReport { skills, variants, by_model })
 }
 
 fn build_pairwise(data: &Data, judgments: &[Judgment], launch_id: i64) -> Option<Pairwise> {
@@ -676,12 +837,15 @@ fn build_ablation(data: &Data, meta: &AblationMeta, metric: &str) -> AblationRep
                 attribution: attribution.into(),
                 cost_effect: eff("cost_usd", &without, &full),
                 tokens_effect: eff("total_tokens", &without, &full),
+                precision_effect: meta.by_sentence().then(|| eff("trigger_precision", &without, &full)).flatten(),
+                recall_effect: meta.by_sentence().then(|| eff("trigger_recall", &without, &full)).flatten(),
             }
         })
         .collect();
     AblationReport {
         source: meta.source.clone(),
         kind: meta.kind.clone(),
+        mode: meta.mode.clone().unwrap_or_else(|| "sections".into()),
         metric: metric.to_string(),
         full_effect: eff(metric, &none, &full),
         description_only_effect: desc.as_ref().and_then(|d| eff(metric, &none, d)),
@@ -824,15 +988,17 @@ pub fn render_text(r: &Report) -> String {
         s.push_str(&table(&rows));
     }
 
-    let pm = info(&r.primary_metric);
+    // Precision and recall belong to a set of tasks; per task, show how often the skill fired.
+    let task_metric = if stats::TRIGGER_METRICS.contains(&r.primary_metric.as_str()) { "trigger_fired".to_string() } else { r.primary_metric.clone() };
+    let pm = info(&task_metric);
     if r.tasks.len() > 1 || r.variants.len() > 1 {
         s.push_str(&format!("\nPER TASK ({}; * = flaky)\n", pm.label));
         let mut rows = vec![std::iter::once("task".to_string()).chain(std::iter::once("headroom".to_string())).chain(r.variants.iter().map(|v| v.label.clone())).collect::<Vec<_>>()];
         for t in &r.tasks {
             let mut row = vec![t.task_id.clone(), t.headroom.describe()];
             for c in &t.cells {
-                let star = if c.flaky.contains(&r.primary_metric) { "*" } else { "" };
-                row.push(c.metrics.get(&r.primary_metric).map(|x| format!("{}{star} (n={})", fmt_value(&pm, x.mean), x.n)).unwrap_or_else(|| "–".into()));
+                let star = if c.flaky.contains(&task_metric) { "*" } else { "" };
+                row.push(c.metrics.get(&task_metric).map(|x| format!("{}{star} (n={})", fmt_value(&pm, x.mean), x.n)).unwrap_or_else(|| "–".into()));
             }
             rows.push(row);
         }
@@ -891,8 +1057,41 @@ pub fn render_text(r: &Report) -> String {
         }
     }
 
+    if let Some(t) = &r.trigger {
+        s.push_str(&render_trigger_text(t));
+    }
     if let Some(a) = &r.ablation {
         s.push_str(&render_ablation_text(a));
+    }
+    s
+}
+
+pub fn render_trigger_text(t: &TriggerReport) -> String {
+    let rate = |x: &Option<Summary>| x.as_ref().map(|x| format!("{:.0}% [{:.0}%, {:.0}%]", x.mean * 100.0, x.ci_low * 100.0, x.ci_high * 100.0)).unwrap_or_else(|| "–".into());
+    let mut s = format!("\nTRIGGER ({}; rates over tasks [95% CI])\n", t.skills.join(", "));
+    let mut rows = vec![vec!["variant".into(), "precision".into(), "recall".into(), "F1".into(), "should".into(), "should not".into()]];
+    for v in &t.variants {
+        rows.push(vec![v.label.clone(), rate(&v.precision), rate(&v.recall), rate(&v.f1), v.should_tasks.to_string(), v.should_not_tasks.to_string()]);
+    }
+    s.push_str(&table(&rows));
+    if !t.by_model.is_empty() {
+        s.push_str("by model\n");
+        let mut rows = vec![vec!["model".into(), "precision".into(), "recall".into(), "F1".into()]];
+        for m in &t.by_model {
+            rows.push(vec![m.model.clone(), rate(&m.precision), rate(&m.recall), rate(&m.f1)]);
+        }
+        s.push_str(&table(&rows));
+    }
+    for v in &t.variants {
+        let line = |p: &TriggerPrompt| format!("    {} ({:.0}% of {} runs): {}\n", p.task_id, p.fire_rate * 100.0, p.runs, crate::util::clip(&p.prompt, 110));
+        if !v.false_negatives.is_empty() {
+            s.push_str(&format!("  {}: never fired on {} should-fire prompt(s)\n", v.label, v.false_negatives.len()));
+            v.false_negatives.iter().for_each(|p| s.push_str(&line(p)));
+        }
+        if !v.false_positives.is_empty() {
+            s.push_str(&format!("  {}: fired on {} should-not prompt(s)\n", v.label, v.false_positives.len()));
+            v.false_positives.iter().for_each(|p| s.push_str(&line(p)));
+        }
     }
     s
 }
@@ -909,9 +1108,20 @@ pub fn render_ablation_text(a: &AblationReport) -> String {
     if let Some(rate) = a.skill_invoked_rate {
         s.push_str(&format!("  skill invoked in {:.0}% of full-skill runs\n", rate * 100.0));
     }
-    let mut rows = vec![vec!["#".into(), "section".into(), "~tokens".into(), "contribution (full − without) [95% CI]".into(), "attribution".into()]];
+    let by_sentence = a.mode == "description_sentences";
+    let span = |e: &Option<Effect>, i: &MetricInfo| e.as_ref().map(|e| format!("{} [{}, {}]", fmt_delta(i, e.effect), fmt_delta(i, e.ci_low), fmt_delta(i, e.ci_high))).unwrap_or_else(|| "–".into());
+    let mut head: Vec<String> = vec!["#".into(), if by_sentence { "sentence".into() } else { "section".into() }, "~tokens".into(), "contribution (full − without) [95% CI]".into(), "attribution".into()];
+    if by_sentence {
+        head.extend(["precision".to_string(), "recall".to_string()]);
+    }
+    let mut rows = vec![head];
     for sec in &a.sections {
-        rows.push(vec![(sec.index + 1).to_string(), sec.title.clone(), sec.est_tokens.to_string(), sec.effect.as_ref().map(|e| format!("{} [{}, {}]", fmt_delta(&i, e.effect), fmt_delta(&i, e.ci_low), fmt_delta(&i, e.ci_high))).unwrap_or_else(|| "–".into()), sec.attribution.replace('_', " ")]);
+        let mut row = vec![(sec.index + 1).to_string(), crate::util::clip(&sec.title, 70), sec.est_tokens.to_string(), span(&sec.effect, &i), sec.attribution.replace('_', " ")];
+        if by_sentence {
+            row.push(span(&sec.precision_effect, &stats::metric_info("trigger_precision")));
+            row.push(span(&sec.recall_effect, &stats::metric_info("trigger_recall")));
+        }
+        rows.push(row);
     }
     s.push_str(&table(&rows));
     s

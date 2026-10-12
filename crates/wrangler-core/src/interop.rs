@@ -77,9 +77,7 @@ pub fn import_skill_creator(project: &Project, evals_json: &Path, skill_root: Op
             expectations: e.expectations.clone(),
             tags,
             output_file: None,
-            timeout_secs: None,
-            graders: TaskGraders::default(),
-            source: String::new(),
+            ..Default::default()
         };
         let rel = format!("tasks/{skill}/{}.toml", slug(&raw_id));
         let path = project.abs(&rel);

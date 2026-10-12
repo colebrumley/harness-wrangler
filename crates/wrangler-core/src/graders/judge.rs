@@ -124,7 +124,16 @@ fn section<'a>(prompt: &'a str, tag: &str) -> &'a str {
 
 impl JudgeBackend for MockJudge {
     fn complete(&self, prompt: &str, schema: &Value, _cfg: &JudgeCfg, _cancel: &Arc<AtomicBool>) -> Result<JudgeReply> {
-        let value = if schema["properties"].get("winner").is_some() {
+        let value = if schema["properties"].get("should").is_some() {
+            // Trigger corpus drafts: should-fire prompts reuse the description's own words, near misses avoid them.
+            let words: Vec<String> = section(prompt, "description").split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 6).map(|w| w.to_lowercase()).collect();
+            let n = prompt.split("lists of ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|x| x.parse::<usize>().ok()).unwrap_or(4);
+            let word = |i: usize| words.get(i % words.len().max(1)).cloned().unwrap_or_else(|| "thing".into());
+            json!({
+                "should": (0..n).map(|i| format!("Please help with {} for my team, draft {}.", word(i), i + 1)).collect::<Vec<_>>(),
+                "should_not": (0..n).map(|i| format!("What is the history of topic {} in general?", i + 1)).collect::<Vec<_>>(),
+            })
+        } else if schema["properties"].get("winner").is_some() {
             let a = quality_in(section(prompt, "output_a")).unwrap_or(0.5);
             let b = quality_in(section(prompt, "output_b")).unwrap_or(0.5);
             let winner = if (a - b).abs() < 0.02 {

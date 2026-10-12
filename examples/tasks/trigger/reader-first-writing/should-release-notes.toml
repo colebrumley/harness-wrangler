@@ -1,0 +1,5 @@
+id = "rfw-should-release-notes"
+prompt = "Draft release notes for version 2.4. It adds CSV export, fixes the login timeout, and drops support for Node 16."
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

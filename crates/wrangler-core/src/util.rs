@@ -85,6 +85,16 @@ pub fn truncate_middle(s: &str, max: usize) -> String {
     format!("{head}\n\n[... {} characters omitted ...]\n\n{tail}", n - max)
 }
 
+/// One line, at most `max` characters, with an ellipsis when cut.
+pub fn clip(s: &str, max: usize) -> String {
+    let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        format!("{}…", one.chars().take(max.saturating_sub(1)).collect::<String>())
+    }
+}
+
 pub fn slug(s: &str) -> String {
     let mut out = String::new();
     for ch in s.chars() {

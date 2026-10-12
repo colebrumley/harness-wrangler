@@ -1,0 +1,5 @@
+id = "rfw-should-status-update"
+prompt = "Write this week's status for my manager, in the style of our weekly reports: the migration is 80% done, blocked on a vendor API key, and the new estimate is Thursday."
+trigger = "should"
+max_turns = 2
+tags = ["trigger"]

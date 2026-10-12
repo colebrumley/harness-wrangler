@@ -63,6 +63,31 @@ pub struct Experiment {
     pub graders: BTreeMap<String, GraderDefaults>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ablation: Option<AblationMeta>,
+    /// Trigger experiment: which skill(s) the tasks' `trigger` fields are about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerCfg>,
+}
+
+/// `[trigger] skill = "name"` (or `skills = [...]`). Every task that carries
+/// `trigger = "should" | "should_not"` is graded on whether the skill fired.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TriggerCfg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+}
+
+impl TriggerCfg {
+    pub fn names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.skill.iter().cloned().collect();
+        for s in &self.skills {
+            if !v.contains(s) {
+                v.push(s.clone());
+            }
+        }
+        v
+    }
 }
 
 fn default_runs() -> u32 {
@@ -306,7 +331,18 @@ pub struct AblationMeta {
     pub full: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_only: Option<String>,
+    /// `sections` (default): the body split at headings.
+    /// `description_sentences`: the frontmatter description split into
+    /// sentences, body intact; `sections` then holds one entry per sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub sections: Vec<AblationSection>,
+}
+
+impl AblationMeta {
+    pub fn by_sentence(&self) -> bool {
+        self.mode.as_deref() == Some("description_sentences")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -321,7 +357,7 @@ pub struct AblationSection {
 
 // ---------------------------------------------------------------- tasks
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     #[serde(default)]
@@ -343,7 +379,15 @@ pub struct Task {
     pub output_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    #[serde(default)]
+    /// Stop the agent after this many turns (overrides `[runner] max_turns`).
+    /// Reaching a task's own cap is a normal end, not a timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// `should` or `should_not`: whether the skill named by the experiment's
+    /// `[trigger]` ought to fire on this prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "TaskGraders::is_empty")]
     pub graders: TaskGraders,
     /// Path of the task file relative to the project root (set at load).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -414,6 +458,12 @@ fn default_include() -> String {
 }
 fn default_assistant() -> String {
     "assistant".into()
+}
+
+impl TaskGraders {
+    pub fn is_empty(&self) -> bool {
+        self.deterministic.is_empty() && self.judge.is_none() && self.human.is_none()
+    }
 }
 
 /// Deterministic grader specification.
@@ -594,6 +644,19 @@ pub struct Variant {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Skills this variant's overlays install, with their descriptions as
+    /// they were when the launch was created. Empty until then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillInfo {
+    /// Directory name under `.claude/skills/`.
+    pub dir: String,
+    /// `name` from the frontmatter, or the directory name.
+    pub name: String,
+    pub description: String,
 }
 
 impl Variant {
@@ -742,13 +805,19 @@ impl Experiment {
                 } else {
                     levels.iter().map(|(_, l)| l.label.clone()).collect::<Vec<_>>().join(" · ")
                 };
-                Variant { key, label, levels, runner, model, effort }
+                Variant { key, label, levels, runner, model, effort, skills: vec![] }
             })
             .collect()
     }
 }
 
 impl Task {
+    /// `Some(true)` when the skill should fire on this prompt, `Some(false)`
+    /// when it should not, `None` for an ordinary task.
+    pub fn should_trigger(&self) -> Option<bool> {
+        self.trigger.as_deref().map(|t| t == "should")
+    }
+
     pub fn parse(text: &str) -> Result<Task> {
         let t: Task = toml::from_str(text).context("parsing task TOML")?;
         if t.id.trim().is_empty() {
@@ -756,6 +825,11 @@ impl Task {
         }
         if t.prompt.trim().is_empty() && t.prompt_file.is_none() {
             bail!("task `{}` has neither `prompt` nor `prompt_file`", t.id);
+        }
+        if let Some(tr) = &t.trigger {
+            if tr != "should" && tr != "should_not" {
+                bail!("task `{}`: trigger must be \"should\" or \"should_not\", not \"{tr}\"", t.id);
+            }
         }
         Ok(t)
     }

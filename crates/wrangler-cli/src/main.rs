@@ -12,7 +12,7 @@ use std::sync::Arc;
 use wrangler_core::ablation::{self, AblationRequest};
 use wrangler_core::project::Suite;
 use wrangler_core::scheduler::{self, Event, RunOptions};
-use wrangler_core::{advice, interop, report, review, runner, stats, suite, Project, Store};
+use wrangler_core::{advice, interop, report, review, runner, stats, suite, trigger, Project, Store};
 
 #[derive(Parser)]
 #[command(name = "wrangler", version, about = "Controlled experiments over coding-agent harness patterns")]
@@ -121,6 +121,10 @@ enum Cmd {
         /// Add a frontmatter-only variant to separate triggering from content.
         #[arg(long)]
         description_only: bool,
+        /// Ablate the description one sentence at a time (body intact) and
+        /// attribute trigger precision and recall to each sentence.
+        #[arg(long)]
+        description_sentences: bool,
         /// Task globs (repeatable). Default tasks/**/*.toml.
         #[arg(long = "tasks")]
         tasks: Vec<String>,
@@ -138,6 +142,17 @@ enum Cmd {
         rubric: Option<String>,
         #[arg(long)]
         metric: Option<String>,
+    },
+    /// Draft should-fire and should-not-fire prompts for a skill from its description.
+    TriggerSet {
+        /// Skill name, or a path to its SKILL.md, directory or overlay.
+        skill: String,
+        /// Prompts of each kind.
+        #[arg(long, default_value_t = 20)]
+        n: usize,
+        /// Model that drafts the prompts.
+        #[arg(long, default_value = "claude-sonnet-5-5")]
+        model: String,
     },
     /// Tracked regression suites and per-model baselines.
     Suite {
@@ -426,7 +441,8 @@ fn real_main(cli: Cli) -> Result<()> {
             let variants = exp.variants();
             let total = tasks.len() * variants.len() * exp.runs_per_cell as usize;
             if json {
-                return print_json(&json!({"ok": true, "experiment": exp, "variants": variants, "tasks": tasks.iter().map(|t| &t.id).collect::<Vec<_>>(), "total_runs": total, "warnings": warnings}));
+                let drafts: Vec<&String> = tasks.iter().filter(|t| t.tags.iter().any(|x| x == "draft")).map(|t| &t.id).collect();
+                return print_json(&json!({"ok": true, "experiment": exp, "variants": variants, "tasks": tasks.iter().map(|t| &t.id).collect::<Vec<_>>(), "draft_tasks": drafts, "total_runs": total, "warnings": warnings}));
             }
             println!("{}: ok", exp.name);
             println!("{} variants × {} tasks × {} reps = {total} runs · isolation {:?} · concurrency {}", variants.len(), tasks.len(), exp.runs_per_cell, exp.isolation, exp.runner.concurrency);
@@ -439,6 +455,26 @@ fn real_main(cli: Cli) -> Result<()> {
             for w in warnings {
                 println!("warning: {w}");
             }
+            // Drafts were written by a model or harvested; they need a human look.
+            for t in tasks.iter().filter(|t| t.tags.iter().any(|x| x == "draft")) {
+                println!("draft: task {} ({}) is tagged `draft`; review it and remove the tag", t.id, t.source);
+            }
+        }
+        Cmd::TriggerSet { skill, n, model } => {
+            let cancel = cancel_on_sigint();
+            let set = trigger::generate(&project, &skill, n.clamp(1, 100), &model, &cancel)?;
+            if json {
+                return print_json(&set);
+            }
+            println!("{}: {}\n", set.skill, set.description);
+            println!("SHOULD FIRE ({})", set.should.len());
+            set.should.iter().enumerate().for_each(|(i, p)| println!("  {:>2}. {p}", i + 1));
+            println!("\nSHOULD NOT FIRE ({}; near misses)", set.should_not.len());
+            set.should_not.iter().enumerate().for_each(|(i, p)| println!("  {:>2}. {p}", i + 1));
+            let dir = set.written.first().and_then(|w| w.rsplit_once('/')).map(|(d, _)| d.to_string()).unwrap_or_default();
+            println!("\nwrote {} draft task(s) under {dir}/ (drafting cost ${:.4})", set.written.len(), set.cost_usd);
+            println!("review them: delete the weak ones, fix the near misses that are not near, then remove the `draft` tag.");
+            println!("an experiment over them needs `[trigger] skill = \"{}\"` and `[tasks] include = [\"{dir}/*.toml\"]`; see docs/formats.md.", set.skill);
         }
         Cmd::Run { experiment, reps, concurrency, no_judge, note, budget, baseline_only } => {
             let mut exp = project.load_experiment(&experiment)?;
@@ -590,8 +626,8 @@ fn real_main(cli: Cli) -> Result<()> {
                 println!("\n(use --output, --diff or --transcript for the content)");
             }
         }
-        Cmd::Ablate { source, name, depth, description_only, tasks, reps, runner, model, effort, judge_model, rubric, metric } => {
-            let plan = ablation::generate(&project, &AblationRequest { source, name, depth: Some(depth), description_only, tasks, runs_per_cell: reps, runner, model, effort, judge_model, rubric, primary_metric: metric })?;
+        Cmd::Ablate { source, name, depth, description_only, description_sentences, tasks, reps, runner, model, effort, judge_model, rubric, metric } => {
+            let plan = ablation::generate(&project, &AblationRequest { source, name, depth: Some(depth), description_only, description_sentences, tasks, runs_per_cell: reps, runner, model, effort, judge_model, rubric, primary_metric: metric })?;
             if json {
                 return print_json(&plan);
             }

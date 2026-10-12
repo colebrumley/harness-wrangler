@@ -46,6 +46,10 @@ pub fn metric_info(name: &str) -> MetricInfo {
         "expectations_passed" => ("Expectations met", Higher, Rate, ""),
         "judge_score" => ("Judge score", Higher, Score10, "/10"),
         "skill_invoked" => ("Skill invoked", Higher, Rate, ""),
+        "trigger_precision" => ("Trigger precision", Higher, Rate, ""),
+        "trigger_recall" => ("Trigger recall", Higher, Rate, ""),
+        "trigger_f1" => ("Trigger F1", Higher, Rate, ""),
+        "trigger_fired" => ("Skill fired", None, Rate, ""),
         "cache_hit" => ("Cache hit", Higher, Rate, ""),
         "cost_usd" => ("Cost", Lower, Positive, "$"),
         "judge_cost_usd" => ("Judge cost", Lower, Positive, "$"),
@@ -78,7 +82,7 @@ pub fn metric_info(name: &str) -> MetricInfo {
 }
 
 /// Metrics shown by default in reports, in display order.
-pub const HEADLINE: &[&str] = &["pass", "judge_score", "expectations_passed", "checks_passed", "skill_invoked", "cost_usd", "wall_time_s", "total_tokens", "output_tokens", "turns", "tool_calls", "output_words", "diff_lines"];
+pub const HEADLINE: &[&str] = &["pass", "judge_score", "expectations_passed", "checks_passed", "skill_invoked", "trigger_fired", "cost_usd", "wall_time_s", "total_tokens", "output_tokens", "turns", "tool_calls", "output_words", "diff_lines"];
 
 pub fn mean(xs: &[f64]) -> f64 {
     if xs.is_empty() {
@@ -418,6 +422,103 @@ pub fn is_flaky(xs: &[f64], scale: Scale) -> bool {
     }
 }
 
+// ----------------------------------------------------------------- trigger
+
+pub const TRIGGER_METRICS: &[&str] = &["trigger_precision", "trigger_recall", "trigger_f1"];
+
+/// One trigger task in one variant: whether the skill should fire on it,
+/// and whether it fired (1 or 0) in each run.
+#[derive(Debug, Clone)]
+pub struct TriggerTask {
+    pub should: bool,
+    pub fired: Vec<f64>,
+}
+
+/// Precision, recall or F1 over tasks, each task weighing in by its fire
+/// rate. `None` when the metric is undefined: precision when nothing fired,
+/// recall when no task should fire.
+pub fn trigger_value(tasks: &[&TriggerTask], metric: &str) -> Option<f64> {
+    let rate = |t: &&TriggerTask| mean(&t.fired);
+    let tp: f64 = tasks.iter().filter(|t| t.should && !t.fired.is_empty()).map(rate).sum();
+    let fp: f64 = tasks.iter().filter(|t| !t.should && !t.fired.is_empty()).map(rate).sum();
+    let positives = tasks.iter().filter(|t| t.should && !t.fired.is_empty()).count() as f64;
+    let precision = (tp + fp > 0.0).then(|| tp / (tp + fp));
+    let recall = (positives > 0.0).then(|| tp / positives);
+    match metric {
+        "trigger_precision" => precision,
+        "trigger_recall" => recall,
+        // With nothing fired F1 is 0 when something should have, undefined otherwise.
+        _ => match (precision, recall) {
+            (Some(p), Some(r)) if p + r > 0.0 => Some(2.0 * p * r / (p + r)),
+            (_, Some(_)) => Some(0.0),
+            _ => Option::None,
+        },
+    }
+}
+
+/// A trigger metric for one variant with a bootstrapped 95% CI over tasks.
+pub fn trigger_summary(tasks: &[TriggerTask], metric: &str, seed: u64) -> Option<Summary> {
+    let all: Vec<&TriggerTask> = tasks.iter().collect();
+    let point = trigger_value(&all, metric)?;
+    let mut rng = Rng::new(seed);
+    let mut boots: Vec<f64> = (0..BOOTSTRAP_ITERS).filter_map(|_| trigger_value(&(0..all.len()).map(|_| all[rng.below(all.len())]).collect::<Vec<_>>(), metric)).collect();
+    boots.sort_by(|a, b| a.total_cmp(b));
+    let (lo, hi) = if boots.is_empty() { (point, point) } else { (percentile(&boots, 0.025), percentile(&boots, 0.975)) };
+    Some(Summary { n: tasks.len(), mean: point, sd: 0.0, min: lo, max: hi, ci_low: lo, ci_high: hi })
+}
+
+/// Difference in a trigger metric between two variants (B minus A), paired
+/// by task: each bootstrap draw resamples tasks once and scores both arms
+/// on the same draw.
+pub fn trigger_effect(units: &[(TriggerTask, TriggerTask)], metric: &str, seed: u64) -> Option<Effect> {
+    let info = metric_info(metric);
+    let side = |pick: &dyn Fn(&(TriggerTask, TriggerTask)) -> &TriggerTask, idx: &[usize]| -> Option<f64> { trigger_value(&idx.iter().map(|i| pick(&units[*i])).collect::<Vec<_>>(), metric) };
+    let every: Vec<usize> = (0..units.len()).collect();
+    let (base, treat) = (side(&|u| &u.0, &every)?, side(&|u| &u.1, &every)?);
+    let mut rng = Rng::new(seed);
+    let mut boots = vec![];
+    for _ in 0..BOOTSTRAP_ITERS {
+        let idx: Vec<usize> = (0..units.len()).map(|_| rng.below(units.len())).collect();
+        if let (Some(a), Some(b)) = (side(&|u| &u.0, &idx), side(&|u| &u.1, &idx)) {
+            boots.push(b - a);
+        }
+    }
+    boots.sort_by(|a, b| a.total_cmp(b));
+    let effect = treat - base;
+    let (ci_low, ci_high) = if boots.is_empty() { (effect, effect) } else { (percentile(&boots, 0.025), percentile(&boots, 0.975)) };
+    let band = equivalence_band(info.scale, base);
+    let at_bound = |v: f64| v <= 1e-9 || v >= 1.0 - 1e-9;
+    let flat = (ci_high - ci_low).abs() < 1e-12 && effect.abs() < 1e-12;
+    let verdict = if units.len() < 2 {
+        Verdict::Inconclusive
+    } else if flat && at_bound(base) && at_bound(treat) {
+        Verdict::NoHeadroom
+    } else if flat {
+        Verdict::Inconclusive
+    } else if ci_low > 0.0 {
+        Verdict::Better
+    } else if ci_high < 0.0 {
+        Verdict::Worse
+    } else if ci_low >= -band && ci_high <= band {
+        Verdict::Neutral
+    } else {
+        Verdict::Inconclusive
+    };
+    Some(Effect {
+        effect,
+        ci_low,
+        ci_high,
+        rel: (base.abs() > 1e-12).then(|| effect / base),
+        base_mean: base,
+        treat_mean: treat,
+        units: units.len(),
+        n_a: units.iter().map(|u| u.0.fired.len()).sum(),
+        n_b: units.iter().map(|u| u.1.fired.len()).sum(),
+        verdict,
+        saturated_units: 0,
+    })
+}
+
 // ---------------------------------------------------------- Bradley–Terry
 
 /// One pairwise outcome between items `i` and `j`: `score_i` is 1 for a win
@@ -612,6 +713,30 @@ mod tests {
         // Three runs that split are too few to call.
         assert!(!is_flaky(&[1.0, 0.0, 1.0], Scale::Rate));
         assert!(!is_flaky(&[2.0, 8.0, 5.0, 9.0], Scale::Score10));
+    }
+
+    #[test]
+    fn trigger_precision_recall_and_paired_effect() {
+        let t = |should: bool, fired: &[f64]| TriggerTask { should, fired: fired.to_vec() };
+        // 4 should-fire tasks (fires on 3), 4 should-not (fires on 1).
+        let tasks = vec![t(true, &[1.0, 1.0]), t(true, &[1.0, 1.0]), t(true, &[1.0, 1.0]), t(true, &[0.0, 0.0]), t(false, &[1.0, 1.0]), t(false, &[0.0, 0.0]), t(false, &[0.0, 0.0]), t(false, &[0.0, 0.0])];
+        let v = |m: &str| trigger_value(&tasks.iter().collect::<Vec<_>>(), m).unwrap();
+        assert!((v("trigger_precision") - 0.75).abs() < 1e-9);
+        assert!((v("trigger_recall") - 0.75).abs() < 1e-9);
+        assert!((v("trigger_f1") - 0.75).abs() < 1e-9);
+        let s = trigger_summary(&tasks, "trigger_recall", 1).unwrap();
+        assert!(s.ci_low < 0.75 && s.ci_high >= 0.75 && s.n == 8, "{s:?}");
+        // Nothing fired: precision is undefined, recall and F1 are zero.
+        let silent = vec![t(true, &[0.0]), t(false, &[0.0])];
+        let sv = |m: &str| trigger_value(&silent.iter().collect::<Vec<_>>(), m);
+        assert_eq!((sv("trigger_precision"), sv("trigger_recall"), sv("trigger_f1")), (Option::None, Some(0.0), Some(0.0)));
+        // B fires on every should task and no should-not task; A is the set above.
+        let perfect: Vec<TriggerTask> = tasks.iter().map(|x| t(x.should, if x.should { &[1.0, 1.0] } else { &[0.0, 0.0] })).collect();
+        let units: Vec<(TriggerTask, TriggerTask)> = tasks.iter().cloned().zip(perfect.iter().cloned()).collect();
+        let e = trigger_effect(&units, "trigger_f1", 1).unwrap();
+        assert!((e.effect - 0.25).abs() < 1e-9 && e.units == 8, "{e:?}");
+        let same: Vec<(TriggerTask, TriggerTask)> = perfect.iter().cloned().zip(perfect.iter().cloned()).collect();
+        assert_eq!(trigger_effect(&same, "trigger_f1", 1).unwrap().verdict, Verdict::NoHeadroom);
     }
 
     #[test]

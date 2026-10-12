@@ -1,0 +1,5 @@
+id = "rfw-should-not-summary-vs-abstract"
+prompt = "What is the difference between a summary and an abstract? One line."
+trigger = "should_not"
+max_turns = 2
+tags = ["trigger"]

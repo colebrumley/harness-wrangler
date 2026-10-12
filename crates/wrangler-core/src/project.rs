@@ -219,7 +219,43 @@ impl Project {
             }
         }
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
+        // A trigger experiment grades every `should` / `should_not` task on
+        // whether the skill fired, without the task author writing the grader.
+        if let Some(trigger) = &exp.trigger {
+            for t in tasks.iter_mut() {
+                let Some(should) = t.should_trigger() else { continue };
+                for skill in trigger.names() {
+                    t.graders.deterministic.push(DetSpec::SkillInvoked { skill: Some(skill.clone()), expect: should, name: Some(format!("trigger:{skill}")) });
+                }
+            }
+        }
         Ok(tasks)
+    }
+
+    /// Skills an overlay level installs, with their frontmatter descriptions.
+    pub fn overlay_skills(&self, overlay: &str) -> Vec<SkillInfo> {
+        if is_empty_overlay(overlay) {
+            return vec![];
+        }
+        let root = self.abs(overlay);
+        let mut dirs: Vec<PathBuf> = if root.join("SKILL.md").is_file() {
+            vec![root.clone()]
+        } else {
+            std::fs::read_dir(root.join(".claude/skills")).map(|rd| rd.flatten().map(|e| e.path()).filter(|d| d.join("SKILL.md").is_file()).collect()).unwrap_or_default()
+        };
+        dirs.sort();
+        dirs.iter()
+            .filter_map(|d| {
+                let text = std::fs::read_to_string(d.join("SKILL.md")).ok()?;
+                let dir = d.file_name()?.to_string_lossy().to_string();
+                let (_, fm, _) = crate::ablation::split_frontmatter(&text);
+                Some(SkillInfo {
+                    name: crate::ablation::frontmatter_field(&text, "name").unwrap_or_else(|| dir.clone()),
+                    description: crate::ablation::description_parts(fm).map(|p| p.text()).unwrap_or_default(),
+                    dir,
+                })
+            })
+            .collect()
     }
 
     pub fn list_all_tasks(&self) -> Vec<Result<Task>> {
@@ -362,7 +398,28 @@ impl Project {
                 warnings.push("docker isolation does not apply network = \"anthropic\"; restrict the network with [runner] docker_args instead".into());
             }
         }
+        if let Some(trigger) = &exp.trigger {
+            let names = trigger.names();
+            if names.is_empty() {
+                bail!("[trigger] needs `skill = \"name\"` or `skills = [...]`");
+            }
+            if tasks.iter().all(|t| t.trigger.is_none()) {
+                bail!("[trigger] is set but no selected task has `trigger = \"should\"` or `\"should_not\"`");
+            }
+            let installed: Vec<String> = exp.factors.iter().filter(|f| f.kind == FactorKind::Overlay).flat_map(|f| f.levels.iter()).flat_map(|l| self.overlay_skills(l.value())).flat_map(|s| [s.name, s.dir]).collect();
+            for n in names.iter().filter(|n| !installed.contains(n)) {
+                warnings.push(format!("[trigger] skill `{n}` is not installed by any overlay level; it can never fire"));
+            }
+            if tasks.iter().filter(|t| t.trigger.is_some()).all(|t| t.should_trigger() == Some(true)) {
+                warnings.push("every trigger task is `should`: recall can be measured but precision cannot (add `should_not` prompts)".into());
+            }
+        } else if tasks.iter().any(|t| t.trigger.is_some()) {
+            warnings.push("some tasks carry `trigger` but the experiment has no [trigger] skill; the field is ignored".into());
+        }
         let variants = exp.variants();
+        if variants.iter().any(|v| v.runner == "codex") && (exp.runner.max_turns.is_some() || tasks.iter().any(|t| t.max_turns.is_some())) {
+            warnings.push("runner `codex` has no turn cap; max_turns is ignored for its runs".into());
+        }
         warnings.extend(crate::runner::capability_warnings(exp, &variants)?);
         let total = variants.len() * tasks.len() * exp.runs_per_cell as usize;
         if total > 500 {

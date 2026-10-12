@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Ctx } from "../App";
-import { Comparison, Report, fmtDelta, fmtValue, info, remember, usd } from "../api";
+import { Comparison, Report, Summary, TriggerReport, fmtDelta, fmtValue, info, remember, usd } from "../api";
 import { Empty, ErrorNote, Forest, MeanBar, Panel, Seg, VerdictMark, equivalenceBand } from "../components";
 import { useLoad } from "../hooks";
 
@@ -16,6 +16,8 @@ export default function Results({ ctx }: { ctx: Ctx }) {
   const r = q.data;
   if (!r) return <div className="content"><ErrorNote error={q.error} />{q.loading && <p className="muted">Computing the report…</p>}</div>;
   remember(r.metrics);
+  // Precision and recall belong to a set of tasks; per task the table shows how often the skill fired.
+  const taskMetric = r.primary_metric.startsWith("trigger_") ? "trigger_fired" : r.primary_metric;
   const pm = info(r.primary_metric);
   const quality = r.metrics.filter((m) => m.direction === "higher");
   const has = (m: string) => r.metrics.some((x) => x.name === m);
@@ -145,7 +147,7 @@ export default function Results({ ctx }: { ctx: Ctx }) {
         )}
 
         {r.tasks.length > 0 && r.counts.done > 0 && (
-          <Panel title="By task" sub={`${pm.label} per task and variant. Select a cell to see its runs.`}
+          <Panel title="By task" sub={`${info(taskMetric).label} per task and variant. Select a cell to see its runs.`}
             actions={quality.length > 1 ? <Seg options={quality.slice(0, 4).map((m) => [m.name, m.label] as [string, string])} value={r.primary_metric} onChange={setMetric} /> : undefined} flush>
             <div className="scrollx">
               <table className="grid">
@@ -156,16 +158,17 @@ export default function Results({ ctx }: { ctx: Ctx }) {
                       <td><b>{t.task_id}</b> {t.tags.map((x) => <span key={x} className="tag" style={{ marginLeft: 4 }}>{x}</span>)}</td>
                       <td>{t.headroom?.headroom === "ok" || !t.headroom ? <span className="faint">ok</span> : <span className={`chip ${t.headroom.headroom === "none" ? "warn" : ""}`}>{t.headroom.headroom}{t.headroom.at ? `, ${t.headroom.at}` : ""}</span>}</td>
                       {t.cells.map((c) => {
-                        const s = c.metrics[r.primary_metric];
+                        const tm = info(taskMetric);
+                        const s = c.metrics[taskMetric];
                         const on = cell?.task === t.task_id && cell?.variant === c.variant_key;
-                        const flaky = c.flaky.includes(r.primary_metric);
+                        const flaky = c.flaky.includes(taskMetric);
                         return (
                           <td key={c.variant_key} className="num">
                             <button className="heat btn quiet" style={{ color: "inherit", background: on ? "var(--accent-soft)" : undefined }} onClick={() => setCell(on ? null : { task: t.task_id, variant: c.variant_key })}
                               aria-expanded={on}
-                              aria-label={`${t.task_id}, ${r.variants.find((v) => v.key === c.variant_key)?.label}: ${s ? `${pm.label} ${fmtValue(pm, s.mean)}, sd ${fmtValue(pm, s.sd)}, ${s.n} runs` : "no data"}. Show runs.`}>
-                              <b>{fmtValue(pm, s?.mean)}</b>
-                              {s && <span className="faint small"> ±{fmtValue(pm, s.sd).replace("$", "")}</span>}
+                              aria-label={`${t.task_id}, ${r.variants.find((v) => v.key === c.variant_key)?.label}: ${s ? `${tm.label} ${fmtValue(tm, s.mean)}, sd ${fmtValue(tm, s.sd)}, ${s.n} runs` : "no data"}. Show runs.`}>
+                              <b>{fmtValue(tm, s?.mean)}</b>
+                              {s && <span className="faint small"> ±{fmtValue(tm, s.sd).replace("$", "")}</span>}
                               {flaky && <span className="chip warn" style={{ marginLeft: 6 }} title="High variance across repetitions">flaky</span>}
                               {c.counts.failed + c.counts.timeout > 0 && <span className="chip bad" style={{ marginLeft: 6 }}>{c.counts.failed + c.counts.timeout} failed</span>}
                             </button>
@@ -181,9 +184,40 @@ export default function Results({ ctx }: { ctx: Ctx }) {
           </Panel>
         )}
 
+        {r.trigger && <TriggerPanel t={r.trigger} />}
         {r.pairwise && <PairwisePanel p={r.pairwise} />}
       </div>
     </div>
+  );
+}
+
+/** The skill as a classifier: precision and recall over the trigger corpus, and the prompts that went the wrong way. */
+function TriggerPanel({ t }: { t: TriggerReport }) {
+  const rate = (x: Summary | null) => x ? <span title={`95% interval ${Math.round(x.ci_low * 100)}% to ${Math.round(x.ci_high * 100)}%, over ${x.n} tasks`}>{Math.round(x.mean * 100)}% <span className="faint small">[{Math.round(x.ci_low * 100)}, {Math.round(x.ci_high * 100)}]</span></span> : <span className="faint" title="Undefined: the skill never fired">–</span>;
+  const wrong = t.variants.filter((v) => v.false_negatives.length + v.false_positives.length > 0);
+  return (
+    <Panel title="Triggering" sub={`Does ${t.skills.join(", ")} fire on the prompts it should, and stay quiet on the near misses? Rates are over tasks, with 95% bootstrap intervals.`} flush>
+      <div className="scrollx">
+        <table className="grid">
+          <thead><tr><th>Variant</th><th className="num" title="Of the prompts it fired on, the share it should have">Precision</th><th className="num" title="Of the prompts it should fire on, the share it did">Recall</th><th className="num">F1</th><th className="num">Should fire</th><th className="num">Should not</th></tr></thead>
+          <tbody>
+            {t.variants.map((v) => <tr key={v.variant_key}><td><b>{v.label}</b></td><td className="num">{rate(v.precision)}</td><td className="num">{rate(v.recall)}</td><td className="num">{rate(v.f1)}</td><td className="num">{v.should_tasks}</td><td className="num">{v.should_not_tasks}</td></tr>)}
+            {t.by_model.map((m) => <tr key={`m-${m.model}`}><td><span className="muted">all variants with the skill on</span> <b>{m.model}</b></td><td className="num">{rate(m.precision)}</td><td className="num">{rate(m.recall)}</td><td className="num">{rate(m.f1)}</td><td /><td /></tr>)}
+          </tbody>
+        </table>
+      </div>
+      {wrong.length > 0 && (
+        <div className="stack" style={{ padding: "12px 16px" }}>
+          {wrong.map((v) => (
+            <div key={v.variant_key} className="stack tight">
+              <b>{v.label}</b>
+              {v.false_negatives.map((p) => <div key={p.task_id} className="row top"><span className="chip warn" title="Should have fired and never did">missed</span><span><code>{p.task_id}</code> <span className="muted">{p.prompt}</span></span></div>)}
+              {v.false_positives.map((p) => <div key={p.task_id} className="row top"><span className="chip bad" title="Should have stayed quiet">fired {Math.round(p.fire_rate * 100)}%</span><span><code>{p.task_id}</code> <span className="muted">{p.prompt}</span></span></div>)}
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 

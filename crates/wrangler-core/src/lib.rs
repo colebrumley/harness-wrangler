@@ -8,6 +8,7 @@ pub mod graders;
 pub mod interop;
 pub mod isolation;
 pub mod model;
+pub mod placebo;
 pub mod project;
 pub mod report;
 pub mod review;
@@ -17,6 +18,7 @@ pub mod stats;
 pub mod store;
 pub mod suite;
 pub mod transcript;
+pub mod trigger;
 pub mod util;
 pub mod workspace;
 

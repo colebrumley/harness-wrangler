@@ -98,6 +98,8 @@ expected_output = "A short, plain summary under 150 words leading with impact."
 expectations = ["Leads with user impact", "Under 150 words", "No hedging phrases"]
 tags = ["writing"]
 timeout_secs = 600           # overrides the experiment
+max_turns = 2                # overrides [runner] max_turns; reaching a task's own cap is a normal end, not a timeout
+trigger = "should"           # trigger experiments: "should" or "should_not" (see Trigger experiments)
 
 [graders]
 judge = true                 # false skips the LLM judge for this task
@@ -144,9 +146,57 @@ Every grader takes an optional `name`. Give a fixture a `.gitignore` for build d
 
 Every grader takes an optional `name`. The baseline commit is tagged `wrangler-baseline`, so a command grader can check `git diff --quiet wrangler-baseline -- tests`.
 
+## Trigger experiments
+
+For most skills the value is firing at the right moment, and firing on unrelated prompts is a cost on every run. A trigger experiment measures both directions. Triggering is decided from the description and the prompt before the body is read, so these runs stop after a turn or two and need no fixture and no judge.
+
+```toml
+name = "rfw-trigger"
+runs_per_cell = 3
+primary_metric = "trigger_f1"
+
+[runner]
+kind = "claude-code"
+max_turns = 2
+
+[trigger]
+skill = "reader-first-writing"      # or skills = ["a", "b"]
+
+[[factors]]
+name = "overlay"
+kind = "overlay"
+levels = ["overlays/rfw-v1.1.0"]     # one level: a baseline without the skill can never fire
+
+[[factors]]
+name = "model"
+kind = "model"
+levels = ["claude-haiku-5-5", "claude-sonnet-5-5"]
+
+[tasks]
+include = ["tasks/trigger/reader-first-writing/*.toml"]
+```
+
+A trigger task is a prompt and an expectation, nothing else:
+
+```toml
+id = "rfw-should-not-rename-function"
+prompt = "Rename the function send_emails to dispatch_notifications everywhere in this repo."
+trigger = "should_not"
+max_turns = 2
+```
+
+Two turns is enough when the prompt can be acted on at once. A prompt that sends the agent exploring first ("explain how to run the tests in this repo") can spend both turns on `ls` and never reach the point where it would load the skill; that reads as a miss. Keep trigger prompts self-contained, or raise `max_turns` on the tasks that need it.
+
+`[trigger]` turns every task that carries `trigger` into a `skill_invoked` check for the named skill, so `pass` on a trigger task means "fired when it should, or stayed quiet when it should not". Should-not prompts are only worth having when they are near misses: the same domain and vocabulary as the description, at the wrong moment for the skill.
+
+The report gains a trigger section per variant: `trigger_precision`, `trigger_recall` and `trigger_f1` with bootstrap intervals over tasks, the should-fire prompts where the skill never fired, the should-not prompts where it did, and a row per model when there is a model factor. All three are valid `primary_metric` values; comparisons between variants are paired by task. Per run, `trigger_fired` is 1 or 0.
+
+- `wrangler trigger-set <skill> [--n 20] [--model m]` drafts prompts of both kinds from the description and writes them under `tasks/trigger/<skill>/` tagged `draft`. Review them before use; `wrangler validate` lists tasks still tagged `draft`.
+- `wrangler ablate <skill> --description-sentences` writes one variant per sentence removed from the description, with the body byte-identical, and the report attributes precision and recall to each sentence. Advice then names the sentence most likely behind an overfire.
+
 ## Metrics
 
-Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `skill_invoked`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `mcp.<server>.<tool>`, `tool_calls_before_final`, `distinct_tools`, `hook.<Event>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
+Per run, when the runner provides them: `pass` (all deterministic graders passed), `checks_passed`, `judge_score`, `expectations_passed`, `check.<grader>` (each deterministic grader's own pass rate), `skill_invoked`, `trigger_fired`, `cost_usd`, `judge_cost_usd`, `wall_time_s`, `total_tokens`, `input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cache_hit`, `turns`, `tool_calls`, `tool.<Name>`, `mcp.<server>.<tool>`, `tool_calls_before_final`, `distinct_tools`, `hook.<Event>`, `diff_lines`, `diff_added`, `diff_removed`, `files_touched`, `output_words`, `retries`, `permission_denials`, `subagents_spawned`.
 
 ## Suite
 

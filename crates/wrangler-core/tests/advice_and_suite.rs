@@ -5,7 +5,8 @@ use std::sync::Arc;
 use wrangler_core::project::Suite;
 use wrangler_core::scheduler::{self, RunOptions};
 use wrangler_core::store::Annotation;
-use wrangler_core::{advice, interop, review, suite, Store};
+use wrangler_core::model::DetSpec;
+use wrangler_core::{advice, interop, report, review, suite, Project, Store};
 
 fn no_cancel() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
@@ -202,4 +203,117 @@ fn imports_skill_creator_evals() {
     assert_eq!(t.expectations, vec!["The output includes X"]);
     assert_eq!(std::fs::read_to_string(project.abs("fixtures/my-skill-1/in.txt")).unwrap(), "input");
     assert!(project.load_task_file(&project.abs(&written[1])).unwrap().fixture.is_none());
+}
+
+/// Trigger experiments: tasks marked `should` / `should_not` become
+/// `skill_invoked` checks, and the report scores the skill as a classifier.
+#[test]
+fn trigger_corpus_precision_recall_and_advice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path()).unwrap();
+    common::write(tmp.path(), "overlays/notes/.claude/skills/notes-dir/SKILL.md", "---\nname: release-notes\ndescription: Use when drafting release notes. Also for changelog entries. Mentions banana often.\n---\n# Notes\n\nmock-effect: 0.1\n");
+    let task = |id: &str, prompt: &str, trigger: &str| common::write(tmp.path(), &format!("tasks/trigger/{id}.toml"), &format!("id = \"{id}\"\nprompt = \"{prompt}\"\ntrigger = \"{trigger}\"\nmax_turns = 2\n"));
+    task("s1", "Write the release notes for 2.0", "should");
+    task("s2", "Add a changelog line for the fix", "should");
+    task("s3", "Tell users what shipped this week", "should"); // no word from the description: a miss
+    task("n1", "How long is a typical press statement?", "should_not");
+    task("n2", "Peel a banana and describe it", "should_not"); // fires on "banana": an overfire
+    common::write(tmp.path(), "tasks/plain.toml", "id = \"plain\"\nprompt = \"p\"\n");
+    common::write(
+        tmp.path(),
+        "experiments/trig.toml",
+        "name = \"trig\"\nruns_per_cell = 3\n[runner]\nkind = \"mock\"\n[trigger]\nskill = \"release-notes\"\n[[factors]]\nname = \"overlay\"\nkind = \"overlay\"\nlevels = [\"overlays/none\", \"overlays/notes\"]\n[tasks]\ninclude = [\"tasks/trigger/*.toml\"]\n",
+    );
+    let exp = project.load_experiment("trig").unwrap();
+    // Expansion: one skill_invoked grader per trigger task, with the matching expectation.
+    let tasks = project.load_tasks(&exp).unwrap();
+    let expect = |id: &str| match &tasks.iter().find(|t| t.id == id).unwrap().graders.deterministic[..] {
+        [DetSpec::SkillInvoked { skill: Some(s), expect, name: Some(n) }] if s == "release-notes" && n == "trigger:release-notes" => *expect,
+        other => panic!("{id}: {other:?}"),
+    };
+    assert!(expect("s1") && expect("s3") && !expect("n1") && !expect("n2"));
+    assert!(project.validate(&exp).unwrap().iter().all(|w| !w.contains("never fire")));
+
+    let store = Store::open(&project.db_path()).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let rep = report::build(&store, launch, None).unwrap();
+    assert_eq!(rep.primary_metric, "trigger_f1");
+    let t = rep.trigger.as_ref().expect("trigger section");
+    let (none, with) = (&t.variants[0], &t.variants[1]);
+    // Without the skill nothing fires: precision undefined, recall zero.
+    assert!(none.precision.is_none() && none.recall.as_ref().unwrap().mean == 0.0 && none.description.is_none());
+    assert_eq!((with.should_tasks, with.should_not_tasks), (3, 2));
+    assert!((with.recall.as_ref().unwrap().mean - 2.0 / 3.0).abs() < 1e-9, "{:?}", with.recall);
+    assert!((with.precision.as_ref().unwrap().mean - 2.0 / 3.0).abs() < 1e-9, "{:?}", with.precision);
+    assert_eq!(with.false_negatives.iter().map(|p| p.task_id.as_str()).collect::<Vec<_>>(), vec!["s3"]);
+    // A run that fires on a should-not task is a false positive.
+    assert_eq!(with.false_positives.iter().map(|p| (p.task_id.as_str(), p.fire_rate)).collect::<Vec<_>>(), vec![("n2", 1.0)]);
+    assert!(with.description.as_deref().unwrap().starts_with("Use when drafting release notes."));
+    let f1 = rep.comparisons.iter().find(|c| c.metric == "trigger_f1" && c.level == "notes").expect("trigger_f1 is a comparable metric");
+    assert!(f1.effect.effect > 0.6 && f1.effect.units == 5, "{:?}", f1.effect);
+    let text = report::render_text(&rep);
+    assert!(text.contains("TRIGGER (release-notes") && text.contains("fired on 1 should-not prompt(s)"), "{text}");
+    // Reaching a task's own turn cap is a normal end, and each trigger run passes or fails on the trigger.
+    assert!(store.runs(launch).unwrap().iter().all(|r| r.status == "done"));
+
+    let adv = advice::build(&store, launch, None).unwrap();
+    let miss = adv.iter().find(|s| s.kind == "trigger_misses").expect("trigger_misses");
+    assert_eq!(miss.evidence["missed_prompts"][0]["prompt"], "Tell users what shipped this week");
+    assert!(miss.evidence["description"].as_str().unwrap().contains("changelog"));
+    let over = adv.iter().find(|s| s.kind == "trigger_overfires").expect("trigger_overfires");
+    assert_eq!(over.evidence["fired_prompts"][0]["task"], "n2");
+    assert!(over.evidence["description"].as_str().unwrap().contains("banana"));
+    assert!(adv.iter().all(|s| s.kind != "fix_trigger"));
+
+    // Description ablation: removing the banana sentence restores precision, and advice names it.
+    let plan = wrangler_core::ablation::generate(&project, &wrangler_core::ablation::AblationRequest { source: "overlays/notes".into(), description_sentences: true, tasks: vec!["tasks/trigger/*.toml".into()], runs_per_cell: Some(3), runner: Some("mock".into()), ..Default::default() }).unwrap();
+    let exp = project.load_experiment(&plan.experiment).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let rep = report::build(&store, launch, None).unwrap();
+    let ab = rep.ablation.as_ref().unwrap();
+    assert_eq!(ab.mode, "description_sentences");
+    let banana = ab.sections.iter().find(|s| s.title.contains("banana")).unwrap();
+    assert!(banana.precision_effect.as_ref().unwrap().effect < -0.2, "the banana sentence costs precision: {:?}", banana.precision_effect);
+    let changelog = ab.sections.iter().find(|s| s.title.contains("changelog")).unwrap();
+    assert!(changelog.recall_effect.as_ref().unwrap().effect > 0.2, "the changelog sentence carries recall: {:?}", changelog.recall_effect);
+    let adv = advice::build(&store, launch, None).unwrap();
+    let over = adv.iter().find(|s| s.kind == "trigger_overfires" && s.target["variant"] == "full").expect("overfire advice for the full skill");
+    assert!(over.evidence["responsible_sentence"]["text"].as_str().unwrap().contains("banana"), "{}", over.action);
+    assert!(report::render_ablation_text(ab).contains("precision"));
+}
+
+/// The example project's hand-written rfw trigger corpus gives the mock
+/// runner something to get wrong in both directions.
+#[test]
+fn example_rfw_trigger_corpus_is_nontrivial_under_the_mock() {
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path()).unwrap();
+    for dir in ["tasks/trigger/reader-first-writing", "overlays/rfw-v1.1.0"] {
+        wrangler_core::workspace::copy_dir_contents(&examples.join(dir), &{
+            let d = tmp.path().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        })
+        .unwrap();
+    }
+    let mut exp = wrangler_core::Experiment::parse(&std::fs::read_to_string(examples.join("experiments/rfw-trigger.toml")).unwrap()).unwrap();
+    exp.runner.kind = "mock".into();
+    let tasks = project.load_tasks(&exp).unwrap();
+    let count = |should: bool| tasks.iter().filter(|t| t.should_trigger() == Some(should)).count();
+    assert!(count(true) >= 6 && count(false) >= 6, "at least six prompts of each kind");
+    assert!(tasks.iter().all(|t| t.max_turns == Some(2) && t.fixture.is_none()));
+    let store = Store::open(&project.db_path()).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let rep = report::build(&store, launch, None).unwrap();
+    let t = rep.trigger.unwrap();
+    for v in &t.variants {
+        let (p, r) = (v.precision.as_ref().unwrap().mean, v.recall.as_ref().unwrap().mean);
+        assert!(p > 0.3 && p < 1.0 && r > 0.3 && r < 1.0, "precision {p} and recall {r} should both be non-trivial");
+        assert!(!v.false_negatives.is_empty() && !v.false_positives.is_empty());
+    }
+    assert_eq!(t.by_model.len(), 2, "one row per model");
 }
