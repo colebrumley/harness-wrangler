@@ -120,6 +120,10 @@ The diff lists patterns that regressed first, then ones the new model made redun
 
 `examples/experiments/ask-first.toml` compares no instructions against a one-line "ask one question before changing code when the task is underspecified" on a deliberately vague bugfix prompt. A simulated user (a second model with a persona and hidden information) answers the agent's questions and decides when the task is done, so the experiment can measure `questions_asked`, `user_satisfied` and what the question costs. See "Conversation tasks" in [docs/formats.md](docs/formats.md).
 
+## Patterns that are tools
+
+`examples/experiments/mcp-fs.toml` runs the slugify task with and without a filesystem MCP server (`npx -y @modelcontextprotocol/server-filesystem`), under seatbelt with the npm registry allowed. An `mcp` factor's levels are MCP config files; exactly the level's servers load, and their calls are counted as `mcp.<server>.<tool>`. See "Tools and MCP servers" in [docs/formats.md](docs/formats.md).
+
 ## Does a skill behave differently across models?
 
 Cross the skill with a model factor in one experiment:
@@ -167,3 +171,5 @@ WRANGLER_LIVE=1 WRANGLER_LIVE_CODEX=1 cargo test -p wrangler-core --test live_ru
 - `isolation = "docker"` needs an image with the runner CLI and a token in the environment (`claude setup-token` gives one for a subscription); the keychain login cannot enter a container.
 - `budget_usd` caps a launch's cost; Codex runs report no cost and do not count toward it.
 - Runs use `bypassPermissions`. Use `isolation = "seatbelt"` for fixtures you do not trust.
+- Conversation tasks (a simulated user) run under Claude Code and the mock runner only, and not under Docker.
+- An MCP server launched with something other than `npx` or `uvx` may need its cache directory added to the seatbelt profile; see docs/isolation.md.

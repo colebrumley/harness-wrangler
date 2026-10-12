@@ -157,6 +157,15 @@ impl AgentRunner for MockRunner {
         }
         body.push_str(line.trim_end());
         body.push('\n');
+        // Each MCP server given to this variant is "used" once, so MCP
+        // experiments have something to count offline.
+        for cfg in mcp_config_paths(ws, variant) {
+            for (server, _) in mcp_servers(&cfg)? {
+                let id = format!("call_mcp_{server}");
+                turns.push(Turn { role: "assistant".into(), tool_calls: vec![ToolCall { id: id.clone(), name: format!("mcp.{server}.mock_tool"), input: json!({}) }], ..Default::default() });
+                turns.push(Turn { role: "user".into(), tool_results: vec![ToolResult { tool_use_id: id, content: "ok".into(), is_error: false }], ..Default::default() });
+            }
+        }
         let out_file = task.output_file.clone().unwrap_or_else(|| "OUTPUT.md".into());
         if let Some(p) = ws.resolve(&out_file) {
             if let Some(parent) = p.parent() {

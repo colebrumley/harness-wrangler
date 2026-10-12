@@ -23,7 +23,7 @@ description = "Does rfw help, and does effort matter?"
 runs_per_cell = 5            # default 5
 timeout_secs = 900           # per run, default 900
 isolation = "seatbelt"       # "workspace" (default), "seatbelt", or "docker"
-network = "anthropic"        # seatbelt only: "full" (default) or "anthropic"
+network = "anthropic"        # seatbelt only: "full" (default), "anthropic", or { allow = ["anthropic", "localhost:8080"] }
 primary_metric = "judge_score"   # optional; default judge_score, then pass
 budget_usd = 25.0            # optional cap for one launch, agent + judge cost
 keep_workspaces = false      # keep each run's temp workspace on disk
@@ -72,8 +72,42 @@ The first level of each factor is its baseline. Variants are the cross product o
 | `runner` | runner ids | A level may be a table carrying that runner's model: `{ value = "codex", model = "gpt-5.5", effort = "low" }`. |
 | `system_prompt_append` | text, or `file:path` | `""` means no append. |
 | `knob` | values for a CLI flag or env var | Needs `flag = "--some-flag"` or `env = "NAME"`. `on`/`off` toggles a bare flag. |
+| `mcp` | MCP config files, relative to the project | Each file is `{"mcpServers": {...}}`. `""` means no server. Several `mcp` factors stack. See "Tools and MCP servers". |
 
 A level can be written as a table to give it a label: `{ value = "overlays/rfw-v1.2-draft", label = "draft" }`.
+
+### Tools and MCP servers
+
+Some patterns give the agent capabilities, not instructions. Runs hide every MCP server by default (`--strict-mcp-config`), so a server is something a variant puts back.
+
+```toml
+[[factors]]
+name = "tools"
+kind = "mcp"
+levels = [{ value = "", label = "none" }, { value = "mcp/filesystem.json", label = "filesystem" }]
+```
+
+```json
+{ "mcpServers": { "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] } } }
+```
+
+- Claude Code gets `--mcp-config <absolute path>` and keeps `--strict-mcp-config`, so exactly the level's servers load. Relative paths in a server's arguments resolve against the run's workspace.
+- An overlay may carry `.mcp.json` at its root. Claude Code does not read a workspace `.mcp.json` under `--strict-mcp-config` (measured; see [isolation.md](isolation.md)), so the runner passes it with `--mcp-config` as well. Use the factor to vary servers on their own, the overlay file when a server belongs with a skill or a `CLAUDE.md`.
+- Codex: the config is translated into `[mcp_servers]` of the per-run `CODEX_HOME/config.toml`. Stdio servers only; others are skipped with a note on the run.
+- Tool names from MCP servers are `mcp.<server>.<tool>` under both runners. Each call is counted in a metric of that name, and `tool_call` graders match them: `{ kind = "tool_call", name = "mcp.filesystem.*" }`.
+- Under `isolation = "seatbelt"` a stdio server starts inside the run's sandbox. Reads are not restricted, so its binary and runtime are readable; writes stay in the workspace, plus the launcher's own cache (`~/.npm` for `npx`, the uv cache for `uvx`). A server that needs the network needs it allowed: `network = { allow = ["anthropic", "registry.npmjs.org"] }` lets `npx` fetch a package, and `"localhost:8080"` lets the agent reach an HTTP server on this machine. Under Docker the server must exist in the image.
+
+Built-in tools are varied with a `knob` factor, which passes any CLI flag:
+
+```toml
+[[factors]]
+name = "tools"
+kind = "knob"
+flag = "--disallowedTools"
+levels = [{ value = "off", label = "all tools" }, { value = "WebSearch WebFetch", label = "no web" }]
+```
+
+`--tools` works the same way to give an explicit list (`"Bash,Read,Edit"`). `off` omits the flag for that level.
 
 ### Judge options
 

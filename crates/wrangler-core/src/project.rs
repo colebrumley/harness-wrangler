@@ -272,6 +272,7 @@ impl Project {
             let p = e.path();
             let is_overlay = p.join("CLAUDE.md").exists()
                 || p.join("AGENTS.md").exists()
+                || p.join(".mcp.json").exists()
                 || p.join(".claude").exists()
                 || p.file_name().map(|n| n == "none").unwrap_or(false);
             if is_overlay {
@@ -343,6 +344,28 @@ impl Project {
                     FactorKind::Overlay => {
                         if !is_empty_overlay(l.value()) && !self.abs(l.value()).is_dir() {
                             bail!("overlay `{}` (factor `{}`) is not a directory", l.value(), f.name);
+                        }
+                    }
+                    FactorKind::Mcp => {
+                        let v = l.value();
+                        if !v.trim().is_empty() && v != "none" {
+                            let servers = crate::runner::mcp_servers(&self.abs(v)).with_context(|| format!("factor `{}`", f.name))?;
+                            if servers.is_empty() {
+                                bail!("MCP config `{v}` (factor `{}`) defines no servers", f.name);
+                            }
+                            for (name, def) in &servers {
+                                match def["command"].as_str() {
+                                    Some(cmd) if !cmd.contains('/') && !on_path(cmd) => warnings.push(format!("MCP server `{name}` ({v}): `{cmd}` is not on PATH; the server will not start")),
+                                    Some(_) => {}
+                                    None if def["url"].as_str().map(|u| u.contains("localhost") || u.contains("127.0.0.1")).unwrap_or(false) && exp.isolation == Isolation::Seatbelt && exp.network == NetworkPolicy::Anthropic => {
+                                        warnings.push(format!("MCP server `{name}` ({v}) is on localhost, which network = \"anthropic\" blocks; use network = {{ allow = [\"anthropic\", \"localhost:<port>\"] }}"))
+                                    }
+                                    None => {}
+                                }
+                            }
+                            if exp.isolation == Isolation::Docker {
+                                warnings.push(format!("MCP config `{v}`: under docker isolation its servers must exist in the image"));
+                            }
                         }
                     }
                     FactorKind::SystemPromptAppend => {
@@ -446,6 +469,10 @@ impl Project {
         }
         Ok(warnings)
     }
+}
+
+fn on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file())).unwrap_or(false)
 }
 
 fn write_if_missing(path: &Path, content: &str) -> Result<()> {

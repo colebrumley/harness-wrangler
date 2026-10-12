@@ -65,7 +65,23 @@ Auth works with no extra allowance: reading the keychain goes through a system s
 
 Seatbelt filters by address, not hostname. So `network = "anthropic"` denies all direct outbound traffic and points the run at a local CONNECT proxy that tunnels only to `anthropic.com`, `claude.ai` and `claude.com` (and subdomains). Blocked hosts are recorded as run events. In the live test Claude Code's own telemetry to Datadog was blocked and the run was unaffected; `curl https://example.com` from the agent was blocked.
 
+`network = { allow = ["anthropic", "registry.npmjs.org", "localhost:8080"] }` is the same proxy with a longer list. `anthropic` stands for the three hosts above; a hostname is matched with its subdomains; `localhost:<port>` (or `127.0.0.1:<port>`) is a server on this machine, which the profile lets the run reach directly, with `NO_PROXY` set so the client does not send it through the proxy. In the live test an HTTP MCP server on a local port answered a tool call from inside the sandbox while `curl https://example.com` was still blocked.
+
 `network = "full"` leaves the network alone.
+
+### MCP servers
+
+Measured on Claude Code 2.1.296:
+
+| Question | Answer | How it was checked |
+|---|---|---|
+| Does `.mcp.json` in the workspace load under `--setting-sources project` with `--strict-mcp-config`? | No. | A workspace `.mcp.json` naming a stdio server: the `init` event's `mcp_servers` was empty. |
+| And without `--strict-mcp-config`? | It loads, and so do the user's claude.ai connectors. | The same run without the flag listed the workspace server (`source: project`) and six connectors. So the strict flag stays on, and nothing is taken from the workspace implicitly. |
+| Does `--mcp-config <file>` load with `--strict-mcp-config`? | Yes, and only that. | `mcp_servers` listed exactly the configured server (`source: dynamic`), which answered a call. |
+| What are MCP tools called in the stream? | `mcp__<server>__<tool>`. | The runner rewrites them to `mcp.<server>.<tool>`, the form Codex reports. |
+| Does a stdio server start inside the seatbelt profile? | Yes. | The profile does not restrict reads. A Python server ran with no extra paths. |
+| What does a server's launcher write outside the workspace? | `npx` writes `~/.npm/_cacache` and `~/.npm/_logs`. | Run under a workspace-only write profile, `npx -y @modelcontextprotocol/server-filesystem .` fails with `EPERM` on both. The runner adds `~/.npm` to the profile when a server's command is `npx`, `npm`, `pnpm` or `bunx`, and the uv cache directories for `uvx` and `uv`. Other launchers get nothing extra; a server that fails to start with `EPERM` needs its cache path added in `mcp_writable_paths`. |
+| Does `npx` need the network? | Yes, the first time, for `registry.npmjs.org`. | Under `network = "anthropic"` the fetch is blocked; `network = { allow = ["anthropic", "registry.npmjs.org"] }` lets it through. |
 
 ## Docker
 

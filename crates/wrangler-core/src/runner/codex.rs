@@ -120,6 +120,16 @@ impl AgentRunner for CodexRunner {
         if skills.is_dir() {
             copy_dir_contents(&skills, &home.join("skills"))?;
         }
+        // MCP servers for this variant go into the per-run home's config.
+        let mcp = mcp_config_paths(ws, variant);
+        let mut mcp_events = vec![];
+        if !mcp.is_empty() {
+            let (toml_text, skipped) = mcp_config_toml(&mcp)?;
+            std::fs::write(home.join("config.toml"), toml_text)?;
+            for name in skipped {
+                mcp_events.push(RunEvent { kind: "note".into(), at_ms: 0, detail: format!("MCP server `{name}` is not a stdio server; Codex runs get stdio servers only"), ..Default::default() });
+            }
+        }
         let args = self.build_args(ws, task, variant, limits);
         let mut env: Vec<(String, String)> = vec![("CODEX_HOME".into(), home.to_string_lossy().to_string())];
         env.extend(variant.knobs().iter().filter_map(|k| k.env.clone().map(|e| (e, k.value.clone()))));
@@ -144,6 +154,7 @@ impl AgentRunner for CodexRunner {
         let _ = std::fs::remove_dir_all(&home);
         let mut rec = parse_jsonl(&out.stdout);
         rec.events.extend(docker_events);
+        rec.events.extend(mcp_events);
         rec.command = command;
         rec.model = variant.model.clone().unwrap_or_default();
         rec.raw_output = out.stdout;
@@ -164,6 +175,35 @@ impl AgentRunner for CodexRunner {
         }
         Ok(rec)
     }
+}
+
+/// Translate MCP config files (`{"mcpServers": {...}}`) into the
+/// `[mcp_servers.<name>]` tables of a Codex `config.toml`. Only stdio
+/// servers (those with a `command`) carry over; the names of the rest are returned.
+pub fn mcp_config_toml(configs: &[PathBuf]) -> Result<(String, Vec<String>)> {
+    let mut servers = toml::map::Map::new();
+    let mut skipped = vec![];
+    for cfg in configs {
+        for (name, def) in mcp_servers(cfg)? {
+            let Some(command) = def["command"].as_str() else {
+                skipped.push(name);
+                continue;
+            };
+            let mut t = toml::map::Map::new();
+            t.insert("command".into(), toml::Value::String(command.to_string()));
+            let args: Vec<toml::Value> = def["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).map(|a| toml::Value::String(a.to_string())).collect();
+            if !args.is_empty() {
+                t.insert("args".into(), toml::Value::Array(args));
+            }
+            if let Some(env) = def["env"].as_object().filter(|e| !e.is_empty()) {
+                t.insert("env".into(), toml::Value::Table(env.iter().filter_map(|(k, v)| Some((k.clone(), toml::Value::String(v.as_str()?.to_string())))).collect()));
+            }
+            servers.insert(name, toml::Value::Table(t));
+        }
+    }
+    let mut root = toml::map::Map::new();
+    root.insert("mcp_servers".into(), toml::Value::Table(servers));
+    Ok((toml::to_string(&toml::Value::Table(root))?, skipped))
 }
 
 /// Codex wraps API errors as a JSON string; pull out the human message.
@@ -319,5 +359,21 @@ mod tests {
         assert!(err.starts_with("The 'not-a-real-model-xyz' model is not supported"), "{err}");
         assert!(rec.transcript.tool_calls().next().is_none() && rec.final_text.is_empty());
         assert!(rec.rate_limited.is_none());
+    }
+
+    #[test]
+    fn mcp_configs_translate_to_codex_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("servers.json");
+        std::fs::write(&cfg, r#"{"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."],"env":{"LOG":"1"}},"web":{"type":"http","url":"http://localhost:8080/mcp"}}}"#).unwrap();
+        let (text, skipped) = mcp_config_toml(&[cfg]).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let fs = &parsed["mcp_servers"]["filesystem"];
+        assert_eq!(fs["command"].as_str(), Some("npx"));
+        assert_eq!(fs["args"].as_array().unwrap().len(), 3);
+        assert_eq!(fs["env"]["LOG"].as_str(), Some("1"));
+        assert!(parsed["mcp_servers"].get("web").is_none());
+        assert_eq!(skipped, vec!["web"]);
+        assert!(mcp_config_toml(&[tmp.path().join("missing.json")]).is_err());
     }
 }

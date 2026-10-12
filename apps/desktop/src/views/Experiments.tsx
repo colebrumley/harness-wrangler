@@ -11,6 +11,7 @@ const FACTOR_KINDS: [string, string][] = [
   ["runner", "Runner"],
   ["system_prompt_append", "System prompt append"],
   ["knob", "Runner flag or env var"],
+  ["mcp", "MCP servers"],
 ];
 
 export default function Experiments({ ctx, selected, sub }: { ctx: Ctx; selected: string | null; sub: string | null }) {
@@ -461,9 +462,10 @@ function Editor({ name, listed = true, ctx, onSaved }: { name: string | null; li
                 <label className="field">Budget for one launch ($)<input type="number" min={0} step="0.5" placeholder="no cap" value={def.budget_usd ?? ""} onChange={(e) => patch((d) => { d.budget_usd = Number(e.target.value) > 0 ? Number(e.target.value) : undefined; })} /></label>
                 {def.isolation === "seatbelt" && (
                   <label className="field">Network
-                    <select value={def.network} onChange={(e) => patch((d) => { d.network = e.target.value; })}>
+                    <select value={typeof def.network === "string" ? def.network : "custom"} onChange={(e) => patch((d) => { if (e.target.value !== "custom") d.network = e.target.value; })}>
                       <option value="full">Unrestricted</option>
                       <option value="anthropic">Anthropic hosts only</option>
+                      {typeof def.network !== "string" && <option value="custom">Allowlist: {(def.network?.allow ?? []).join(", ")} (edit in the TOML tab)</option>}
                     </select>
                   </label>
                 )}
@@ -587,6 +589,7 @@ const FACTOR_HELP: Record<string, FactorHelp> = {
   runner: { name: "runner", start: ["claude-code"], suggest: ["claude-code", "codex", "mock"], placeholder: "Runner", hint: "Each level is an agent harness. To give each runner its own model, edit the levels in the TOML tab." },
   system_prompt_append: { name: "append", start: [""], suggest: [], placeholder: "Text to append, or file:path/to/file.md", hint: "Each level is text appended to the system prompt. The empty level means nothing is appended." },
   knob: { name: "flag", start: [], suggest: [], placeholder: "Value for the flag or variable", hint: "Each level is a value passed to the CLI flag or environment variable above." },
+  mcp: { name: "tools", start: [""], suggest: [], placeholder: "MCP config file, for example mcp/filesystem.json", hint: "Each level is an MCP config file ({\"mcpServers\": ...}) in the project. The empty level means no MCP server. Exactly the level's servers load." },
 };
 
 function uniqueName(factors: any[], base: string): string {
@@ -599,7 +602,7 @@ function LevelChips({ kind, levels, help, suggestions, onChange }: { kind: strin
   const [draft, setDraft] = useState("");
   const add = (v: string) => {
     const value = v.trim();
-    if ((value === "" && kind !== "system_prompt_append") || levels.includes(value)) return;
+    if ((value === "" && kind !== "system_prompt_append" && kind !== "mcp") || levels.includes(value)) return;
     onChange([...levels, value]);
     setDraft("");
   };

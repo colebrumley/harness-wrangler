@@ -328,6 +328,99 @@ fn claude_dialog_stops_at_max_user_turns_live() {
     ws.remove();
 }
 
+fn fixture_script(name: &str) -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name).canonicalize().unwrap().to_string_lossy().to_string()
+}
+
+fn mcp_variants(config: &str) -> Vec<Variant> {
+    Experiment::parse(&format!("name = 'live'\n[runner]\nkind = 'claude-code'\nmodel = 'claude-haiku-5-5'\neffort = 'low'\n[[factors]]\nname = 'tools'\nkind = 'mcp'\nlevels = ['', '{config}']\n")).unwrap().variants()
+}
+
+fn init_servers(rec: &wrangler_core::runner::RunRecord) -> Vec<(String, String)> {
+    let init: serde_json::Value = rec.raw_output.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find(|e| e["subtype"] == "init").expect("init event");
+    init["mcp_servers"].as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap_or("").to_string(), s["status"].as_str().unwrap_or("").to_string())).collect()
+}
+
+/// An `mcp` level puts exactly its server into the run, under seatbelt: the
+/// `init` event lists it and nothing else, it answers a call, and the call
+/// is recorded as `mcp.<server>.<tool>`. The `""` level has no server.
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_mcp_level_under_seatbelt_live() {
+    if !live("WRANGLER_LIVE") {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path()).unwrap();
+    common::write(tmp.path(), "mcp/echo.json", &serde_json::json!({"mcpServers": {"echo": {"command": "python3", "args": [fixture_script("echo_mcp.py")]}}}).to_string());
+    let variants = mcp_variants("mcp/echo.json");
+    let r = runner::get("claude-code").unwrap();
+    let run = |v: &Variant, tag: &str, prompt: &str| {
+        let t = task(prompt);
+        let ws = Workspace::create(&project, &t, &tmp.path().join(tag), "live").unwrap();
+        r.materialize(&ws, v).unwrap();
+        ws.commit_baseline().unwrap();
+        let rec = r.run(&ws, &t, v, &limits(Isolation::Seatbelt, NetworkPolicy::Anthropic)).unwrap();
+        ws.remove();
+        rec
+    };
+    let with = run(&variants[1], "with", "Use the reverse tool on the text \"wrangler\" and reply with only what it returns.");
+    assert!(with.error.is_none(), "{:?}\n{}", with.error, with.stderr);
+    assert_eq!(init_servers(&with), vec![("echo".to_string(), "connected".to_string())], "exactly the configured server");
+    assert_eq!(with.metrics.get("mcp.echo.reverse").copied(), Some(1.0), "{:?}", with.metrics);
+    assert!(with.final_text.contains("relgnarw"), "the server did not answer: {}", with.final_text);
+    assert!(with.transcript.tool_calls().any(|c| c.name == "mcp.echo.reverse"));
+    // The `tool_call` grader matches MCP tools by their normalized name.
+    let specs: Vec<DetSpec> = serde_json::from_value(serde_json::json!([{"kind": "tool_call", "name": "mcp.echo.*"}])).unwrap();
+    let ws = Workspace::create(&project, &task("p"), &tmp.path().join("grade"), "live").unwrap();
+    let grades = wrangler_core::graders::deterministic::grade_all(&specs, &ws, "", &Default::default(), &with.transcript, None, 1);
+    assert_eq!(grades[0].passed, Some(true));
+    ws.remove();
+
+    let without = run(&variants[0], "without", "Reply with the single word ok.");
+    assert!(without.error.is_none(), "{:?}", without.error);
+    assert!(init_servers(&without).is_empty(), "the empty level must have no MCP server: {:?}", init_servers(&without));
+    assert!(without.metrics.keys().all(|k| !k.starts_with("mcp.")));
+}
+
+/// `network = { allow = ["anthropic", "localhost:<port>"] }`: an HTTP MCP
+/// server on this machine is reachable from inside the sandbox, and the rest
+/// of the internet is still blocked.
+#[cfg(target_os = "macos")]
+#[test]
+fn claude_http_mcp_with_network_allowlist_live() {
+    if !live("WRANGLER_LIVE") {
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut server = std::process::Command::new("python3").arg(fixture_script("http_mcp.py")).arg(port.to_string()).spawn().unwrap();
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let project = Project::init(tmp.path()).unwrap();
+    common::write(tmp.path(), "mcp/web.json", &serde_json::json!({"mcpServers": {"web": {"type": "http", "url": format!("http://127.0.0.1:{port}/mcp")}}}).to_string());
+    let v = mcp_variants("mcp/web.json").remove(1);
+    let t = task("Do these two things in order. 1. Use the shout tool on the text \"wrangler\" and remember what it returns. 2. Run this shell command exactly once and do not try alternatives: curl -sS -m 10 -o /dev/null -w '%{http_code}' https://example.com ; then reply with the tool's result and what curl printed.");
+    let ws = Workspace::create(&project, &t, &tmp.path().join("run"), "live").unwrap();
+    let r = runner::get("claude-code").unwrap();
+    r.materialize(&ws, &v).unwrap();
+    ws.commit_baseline().unwrap();
+    let rec = r.run(&ws, &t, &v, &limits(Isolation::Seatbelt, NetworkPolicy::Allow(vec!["anthropic".into(), format!("localhost:{port}")])));
+    let _ = server.kill();
+    let rec = rec.unwrap();
+    assert!(rec.error.is_none(), "{:?}\n{}", rec.error, rec.stderr);
+    assert_eq!(init_servers(&rec), vec![("web".to_string(), "connected".to_string())], "the localhost server must be reachable from the sandbox");
+    assert_eq!(rec.metrics.get("mcp.web.shout").copied(), Some(1.0), "{:?}", rec.metrics);
+    assert!(rec.final_text.contains("WRANGLER"), "{}", rec.final_text);
+    let details: Vec<&str> = rec.events.iter().map(|e| e.detail.as_str()).collect();
+    assert!(details.iter().any(|d| d.contains("network blocked: example.com")), "example.com was not blocked: {details:?}\n{}", rec.final_text);
+    ws.remove();
+}
+
 #[test]
 fn codex_overlay_live() {
     if !live("WRANGLER_LIVE_CODEX") {

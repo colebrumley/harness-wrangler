@@ -1,0 +1,23 @@
+name = "mcp-fs"
+description = "Does giving the agent a filesystem MCP server change a bugfix task? Graded by the tests, the cost, and whether the server's tools get used."
+runs_per_cell = 3
+timeout_secs = 600
+isolation = "seatbelt"
+# npx fetches the server from the npm registry on first use.
+network = { allow = ["anthropic", "registry.npmjs.org"] }
+primary_metric = "pass"
+
+[runner]
+kind = "claude-code"
+concurrency = 3
+model = "claude-haiku-5-5"
+
+# Each level is an MCP config file; "" is no server. Exactly the level's
+# servers load: the runner keeps --strict-mcp-config.
+[[factors]]
+name = "tools"
+kind = "mcp"
+levels = [{ value = "", label = "none" }, { value = "mcp/filesystem.json", label = "filesystem" }]
+
+[tasks]
+include = ["tasks/coding/fix-slugify.toml"]

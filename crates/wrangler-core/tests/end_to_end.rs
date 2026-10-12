@@ -359,3 +359,34 @@ deterministic = [{ kind = "transcript_regex", pattern = "under 100 words", scope
         assert!(m.contains_key("pass"), "a run stopped at the budget is still graded");
     }
 }
+
+/// An `mcp` factor offline: the level's servers show up as `mcp.<server>.<tool>`
+/// metrics, a `tool_call` grader matches them, and a bad config is refused at load.
+#[test]
+fn mcp_factor_under_the_mock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = common::project(tmp.path());
+    common::write(tmp.path(), "mcp/files.json", r#"{"mcpServers":{"files":{"command":"python3","args":["server.py"]}}}"#);
+    common::write(tmp.path(), "mcp/empty.json", r#"{"mcpServers":{}}"#);
+    let toml = |level: &str| {
+        format!(
+            "name = \"tools\"\nruns_per_cell = 2\n[runner]\nkind = \"mock\"\n[[factors]]\nname = \"tools\"\nkind = \"mcp\"\nlevels = [{{ value = \"\", label = \"none\" }}, {{ value = \"{level}\", label = \"files\" }}]\n[tasks]\ninclude = [\"tasks/alpha.toml\"]\n[graders.default]\ndeterministic = [{{ kind = \"tool_call\", name = \"mcp.files.*\", label = \"used-files-server\" }}]\n"
+        )
+    };
+    for (level, why) in [("mcp/missing.json", "reading MCP config"), ("mcp/empty.json", "defines no servers"), ("tasks/alpha.toml", "is not JSON")] {
+        let exp = wrangler_core::Experiment::parse(&toml(level)).unwrap();
+        let err = format!("{:#}", project.validate(&exp).unwrap_err());
+        assert!(err.contains(why), "{level}: {err}");
+    }
+    let exp = wrangler_core::Experiment::parse(&toml("mcp/files.json")).unwrap();
+    let store = Store::open(&project.db_path()).unwrap();
+    let (launch, _) = scheduler::create_launch(&project, &store, &exp, None, "").unwrap();
+    scheduler::execute(&project, &store, launch, &RunOptions::default(), Arc::new(AtomicBool::new(false)), &|_| {}).unwrap();
+    let metrics = store.metrics_for_launch(launch).unwrap();
+    for r in store.runs(launch).unwrap() {
+        let m = &metrics[&r.id];
+        let with = r.variant_key == "tools=files";
+        assert_eq!(m.get("mcp.files.mock_tool").copied(), with.then_some(1.0), "{}", r.variant_key);
+        assert_eq!(m["check.used-files-server"], if with { 1.0 } else { 0.0 });
+    }
+}
